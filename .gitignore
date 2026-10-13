@@ -1,0 +1,18 @@
+.DS_Store
+build/
+dist/
+klog/
+.deps/
+*.log
+# the PC port is fetched, not stored: ps5/patches/sms-pc-port.patch is what this repository adds to it
+vendor/
+# never: disc images, saves, and anything made from the game
+rom/
+*.iso
+*.ciso
+*.gcm
+*.rvz
+*.gci
+*.szs
+# never: texture packs (they belong to their authors)
+mods/

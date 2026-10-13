@@ -1,0 +1,1790 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 2ad719a..8a74c1b 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -90,6 +90,18 @@ include(${CMAKE_BINARY_DIR}/decomp_sources.cmake)
+ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/patches.cmake)
+ 
+ set(SMS_COMMON_DEFS GEKKO TARGET_PC VERSION_GMSE01 BUILD_VERSION=2 NDEBUG=1)
++if(PS5)
++  # The PS5 loads a title's C library at 0x80000000: MEM1 is mapped at
++  # 0xC0000000 instead (platform/port_runtime.cpp), and the SDK's address
++  # macros follow (decomp-patches/zzzz-mem1-01-region-prefix.patch). It stays
++  # above 0x80000000 because the game tells its pointers from small numbers
++  # by that line (TDrawSyncManager::threadFunc took a FIFO pointer below it
++  # for its stop message, and the main loop then waited on a dead thread).
++  # And its low 30 bits are zero, because the graphics layer turns a game
++  # address into a "physical" one by keeping those bits (at 0x90000000 the
++  # vertex decoder read 0x10000000 past its arrays).
++  list(APPEND SMS_COMMON_DEFS PORT_MEM1_REGION_PREFIX=0xC000)
++endif()
+ set(SMS_GAME_FLAGS
+   -w -fno-strict-aliasing -fwrapv -fno-omit-frame-pointer
+   # Retail MSL has no _FORTIFY_SOURCE checks (Ubuntu g++ enables them at -O1+;
+@@ -118,7 +130,8 @@ check_cxx_compiler_flag("-fno-unreachable-traps" SMS_HAVE_NO_UNREACHABLE_TRAPS)
+ if(SMS_HAVE_NO_UNREACHABLE_TRAPS)
+   list(APPEND SMS_GAME_FLAGS -fno-unreachable-traps)
+ endif()
+-if(SMS_ARCH STREQUAL "64")
++# (The PS5 only runs position-independent code; its titles load at 0x400000.)
++if(SMS_ARCH STREQUAL "64" AND NOT PS5)
+   list(APPEND SMS_GAME_FLAGS -fno-pie)
+ endif()
+ # Clang rejects the game's pointer-to-int truncations ((int)ptr, (u32)ptr) as
+@@ -128,6 +141,13 @@ endif()
+ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+   list(APPEND SMS_GAME_FLAGS -fms-extensions)
+ endif()
++# The game's operator new is JKRHeap's, which aligns to 4 or 8 bytes. The PS5's
++# Clang takes operator new to return 16-byte-aligned memory and zeroes two
++# pointer members with one aligned SSE store (M3UModelCommon's constructor
++# faulted there on the console). Tell it the alignment the heap really gives.
++if(PS5)
++  list(APPEND SMS_GAME_FLAGS $<$<COMPILE_LANGUAGE:CXX>:-fnew-alignment=8>)
++endif()
+ 
+ # macOS: native arm64 reserves the low 4 GiB as PAGEZERO, so port_low_alloc
+ # cannot satisfy pointer-in-u32. Build x86_64 (Rosetta) with a 4 KiB pagezero.
+@@ -294,6 +314,10 @@ elseif(WIN32)
+     set(_object_prefix "")
+   endif()
+   set(SMS_OBJCOPY objcopy)
++elseif(PS5)
++  # Cross-compiled: the payload SDK's objcopy, not the build machine's.
++  set(_object_prefix "")
++  set(SMS_OBJCOPY ${PS5_PAYLOAD_SDK}/bin/llvm-objcopy)
+ else()
+   set(_object_prefix "")
+   set(SMS_OBJCOPY objcopy)
+@@ -315,7 +339,7 @@ list(FILTER SMS_PLATFORM_SOURCES EXCLUDE REGEX "/platform/gx/")
+ # platform/mods/eclipse is built by cmake/eclipse.cmake, and only with SMS_ECLIPSE.
+ list(FILTER SMS_PLATFORM_SOURCES EXCLUDE REGEX "/platform/mods/eclipse/")
+ list(FILTER SMS_PLATFORM_SOURCES EXCLUDE REGEX "/tests/")
+-if(WIN32 OR APPLE)
++if(WIN32 OR APPLE OR PS5)
+   list(FILTER SMS_PLATFORM_SOURCES EXCLUDE REGEX "/platform/trace/trace\\.cpp$")
+ endif()
+ add_executable(sms ${SMS_PORT_SRC}/port_main.cpp ${SMS_PLATFORM_SOURCES})
+@@ -366,13 +390,14 @@ if(WIN32)
+     # data. Keep the image below 4 GiB, as on the Linux non-PIE build.
+     target_link_options(sms PRIVATE -Wl,--image-base,0x400000 -Wl,--disable-dynamicbase -Wl,--disable-high-entropy-va)
+   endif()
+-elseif(APPLE)
++elseif(APPLE OR PS5)
+   # Apple ld has no --defsym; provide a normal symbol (DSP HLE does not need the GC address).
++  # The PS5 has its C library at that address: a normal symbol there too.
+   target_sources(sms PRIVATE ${SMS_PORT_SRC}/lbl_80004600_darwin.c)
+ else()
+   target_link_options(sms PRIVATE -Wl,--defsym=lbl_80004600=0x80004600)
+ endif()
+-if(SMS_ARCH STREQUAL "64")
++if(SMS_ARCH STREQUAL "64" AND NOT PS5)
+   target_compile_options(sms PRIVATE -fno-pie)
+   if(NOT APPLE AND NOT WIN32)
+     target_link_options(sms PRIVATE -no-pie)
+diff --git a/decomp-patches/modhook-zz-macos-data-exports.patch b/decomp-patches/modhook-zz-macos-data-exports.patch
+index 6bb5f59..bdd84c6 100644
+--- a/decomp-patches/modhook-zz-macos-data-exports.patch
++++ b/decomp-patches/modhook-zz-macos-data-exports.patch
+@@ -1,12 +1,14 @@
+-Reason: Mach-O does not support the compiler alias attribute. Publish the same retail data names as assembler symbols on macOS; keep ELF/COFF aliases unchanged.
++Reason: Mach-O does not support the compiler alias attribute, and Clang refuses an alias declared as an array of unknown size on any target. Publish the same retail data names as assembler symbols on macOS and for Clang's ELF targets (the PS5); keep GCC's ELF/COFF aliases unchanged.
+ --- a/src/Player/MarioDraw.cpp
+ +++ b/src/Player/MarioDraw.cpp
+-@@ -36,7 +36,11 @@
++@@ -36,7 +36,13 @@
+  
+  #ifdef TARGET_PC
+  // Code mods (sms_mod/modhooks.h) name this by its retail map name.
+ +#if defined(__APPLE__)
+ +__asm__(".globl _marioAnimeFiles\n.set _marioAnimeFiles, __ZL15marioAnimeFiles");
+++#elif defined(__clang__)
+++__asm__(".globl marioAnimeFiles\n.set marioAnimeFiles, _ZL15marioAnimeFiles");
+ +#else
+  extern unkTMarioAnimeFilesStruct portExport_marioAnimeFiles[] __asm__("marioAnimeFiles") __attribute__((alias("_ZL15marioAnimeFiles")));
+ +#endif
+@@ -15,12 +17,14 @@ Reason: Mach-O does not support the compiler alias attribute. Publish the same r
+  #ifdef TARGET_PC
+ --- a/src/Player/Yoshi.cpp
+ +++ b/src/Player/Yoshi.cpp
+-@@ -59,7 +59,11 @@
++@@ -59,7 +59,13 @@
+  #endif
+  #ifdef TARGET_PC
+  // Code mods (sms_mod/modhooks.h) name this by its retail map name.
+ +#if defined(__APPLE__)
+ +__asm__(".globl _bodyColor\n.set _bodyColor, __ZL9bodyColor");
+++#elif defined(__clang__)
+++__asm__(".globl bodyColor\n.set bodyColor, _ZL9bodyColor");
+ +#else
+  extern GXColor portExport_bodyColor[] __asm__("bodyColor") __attribute__((alias("_ZL9bodyColor")));
+ +#endif
+@@ -29,12 +33,14 @@ Reason: Mach-O does not support the compiler alias attribute. Publish the same r
+  // UNUSED (0x2c): movement's dismount plays MSD_SE_YV_YOSHI1 through
+ --- a/src/System/Application.cpp
+ +++ b/src/System/Application.cpp
+-@@ -66,7 +66,11 @@
++@@ -66,7 +66,13 @@
+  static void* arcBufMario;
+  #ifdef TARGET_PC
+  // Code mods (sms_mod/modhooks.h) name this by its retail map name.
+ +#if defined(__APPLE__)
+ +__asm__(".globl _arcBufMario\n.set _arcBufMario, __ZL11arcBufMario");
+++#elif defined(__clang__)
+++__asm__(".globl arcBufMario\n.set arcBufMario, _ZL11arcBufMario");
+ +#else
+  extern void* portExport_arcBufMario __asm__("arcBufMario") __attribute__((alias("_ZL11arcBufMario")));
+ +#endif
+@@ -43,12 +49,14 @@ Reason: Mach-O does not support the compiler alias attribute. Publish the same r
+  static void* bufStageArcBin;
+ --- a/src/Enemy/graph.cpp
+ +++ b/src/Enemy/graph.cpp
+-@@ -134,7 +134,11 @@
++@@ -134,7 +134,13 @@
+  };
+  #ifdef TARGET_PC
+  // Code mods use it by its retail address (platform/mods/eclipse/rawdata.cpp).
+ +#if defined(__APPLE__)
+ +__asm__(".globl _sms_port_grDummyRail\n.set _sms_port_grDummyRail, __ZL11grDummyRail");
+++#elif defined(__clang__)
+++__asm__(".globl sms_port_grDummyRail\n.set sms_port_grDummyRail, _ZL11grDummyRail");
+ +#else
+  extern TRailNode sms_port_grDummyRail[3] __asm__("sms_port_grDummyRail") __attribute__((alias("_ZL11grDummyRail")));
+ +#endif
+@@ -57,12 +65,14 @@ Reason: Mach-O does not support the compiler alias attribute. Publish the same r
+  TGraphWeb::TGraphWeb(TRailNode* param_1, const char* param_2, int param_3)
+ --- a/src/MoveBG/MapObjInit.cpp
+ +++ b/src/MoveBG/MapObjInit.cpp
+-@@ -10812,7 +10812,11 @@
++@@ -10812,7 +10812,13 @@
+  };
+  #ifdef TARGET_PC
+  // Code mods (sms_mod/modhooks.h) name this by its retail map name.
+ +#if defined(__APPLE__)
+ +__asm__(".globl _sObjDataTable\n.set _sObjDataTable, __ZL13sObjDataTable");
+++#elif defined(__clang__)
+++__asm__(".globl sObjDataTable\n.set sObjDataTable, _ZL13sObjDataTable");
+ +#else
+  extern TMapObjData* portExport_sObjDataTable[] __asm__("sObjDataTable") __attribute__((alias("_ZL13sObjDataTable")));
+ +#endif
+diff --git a/decomp-patches/zzzz-mem1-01-region-prefix.patch b/decomp-patches/zzzz-mem1-01-region-prefix.patch
+new file mode 100644
+index 0000000..7741b3b
+--- /dev/null
++++ b/decomp-patches/zzzz-mem1-01-region-prefix.patch
+@@ -0,0 +1,17 @@
++Reason: the port may map MEM1 somewhere other than 0x80000000 (the PS5 loads a title's C library there). PORT_MEM1_REGION_PREFIX, the upper 16 bits of where it is, moves the cached region the SDK's address macros use; the "uncached" mirror is then the same memory, as it is on any host.
++--- a/libs/dolphin/include/dolphin/os.h
+++++ b/libs/dolphin/include/dolphin/os.h
++@@ -38,8 +38,13 @@
++ u32 OSGetConsoleSimulatedMemSize(void);
++ 
++ // Upper words of the masks, since UIMM is only 16 bits
+++#ifdef PORT_MEM1_REGION_PREFIX
+++#define OS_CACHED_REGION_PREFIX   PORT_MEM1_REGION_PREFIX
+++#define OS_UNCACHED_REGION_PREFIX PORT_MEM1_REGION_PREFIX
+++#else
++ #define OS_CACHED_REGION_PREFIX   0x8000
++ #define OS_UNCACHED_REGION_PREFIX 0xC000
+++#endif
++ #define OS_PHYSICAL_MASK          0x3FFF
++ 
++ #define OS_BASE_CACHED   (OS_CACHED_REGION_PREFIX << 16)
+diff --git a/decomp-patches/zzzz-mem1-02-material-anm-range.patch b/decomp-patches/zzzz-mem1-02-material-anm-range.patch
+new file mode 100644
+index 0000000..315b999
+--- /dev/null
++++ b/decomp-patches/zzzz-mem1-02-material-anm-range.patch
+@@ -0,0 +1,16 @@
++Reason: J3DMaterial::getMaterialAnm takes a pointer at or above 0xC0000000 (the end of the cached region on a GameCube) for no animation. With MEM1 moved (PORT_MEM1_REGION_PREFIX, the PS5 has it at 0xC0000000) that was every material animation: no BRK, BTK or BPK took effect, and the plaza gates never revealed their movie. The limit moves with the region.
++--- a/libs/JSystem/include/JSystem/J3D/J3DGraphBase/J3DMaterial.hpp	2026-10-13 20:31:23.797880964 +0100
+++++ b/libs/JSystem/include/JSystem/J3D/J3DGraphBase/J3DMaterial.hpp	2026-10-13 20:31:23.812880958 +0100
++@@ -102,7 +102,12 @@
++ 
++ 	J3DMaterialAnm* getMaterialAnm()
++ 	{
+++#ifdef PORT_MEM1_REGION_PREFIX
+++		// the end of the cached region, a gigabyte above wherever it starts
+++		if ((uintptr_t)mMaterialAnm < ((uintptr_t)PORT_MEM1_REGION_PREFIX << 16) + 0x40000000) {
+++#else
++ 		if ((uintptr_t)mMaterialAnm < 0xC0000000) {
+++#endif
++ 			return mMaterialAnm;
++ 		} else {
++ 			return nullptr;
+diff --git a/decomp-patches/zzzz-ps5-01-fludd-invert-y.patch b/decomp-patches/zzzz-ps5-01-fludd-invert-y.patch
+new file mode 100644
+index 0000000..fdd5871
+--- /dev/null
++++ b/decomp-patches/zzzz-ps5-01-fludd-invert-y.patch
+@@ -0,0 +1,51 @@
++Reason: port (PS5 settings menu): port_fludd_invert_y (and port_fludd_invert_x, left/right in the aiming camera) flips the main stick only where it aims FLUDD: the nozzle angle while Mario sprays standing still, and the over-the-shoulder aiming camera. Walking, swimming and climbing keep the stick as it is.
++--- a/src/Player/WaterGun.cpp	2026-10-13 17:51:18.152842622 +0100
+++++ b/src/Player/WaterGun.cpp	2026-10-13 17:51:18.171843135 +0100
++@@ -276,6 +276,10 @@
++ 	return mario;
++ }
++ 
+++#ifdef TARGET_PC
+++extern "C" int port_fludd_invert_y;
+++#endif
+++
++ void TNozzleBase::calcGunAngle(const TMarioControllerWork& work)
++ {
++ 	// volatile u32 unused1[17];
++@@ -288,6 +292,12 @@
++ 	s16 angle;
++ 	if (NozzleMario(this)->mStatus == MARIO_STATUS_SQUAT) {
++ 			angle = unk36E;
+++#ifdef TARGET_PC
+++		if (port_fludd_invert_y && NozzleMario(this) == gpMarioAddress)
+++			angle -= (s16)(NozzleMario(this)->mGamePad->mCompSPos[0 * 2 + 1]
+++			               * mEmitParams.mRButtonMult.get());
+++		else
+++#endif
++ 		angle += (s16)(NozzleMario(this)->mGamePad->mCompSPos[0 * 2 + 1]
++ 		               * mEmitParams.mRButtonMult.get());
++ 	} else {
++--- a/src/Camera/CameraNotice.cpp	2026-10-13 17:51:18.154842676 +0100
+++++ b/src/Camera/CameraNotice.cpp	2026-10-13 17:51:18.171843135 +0100
++@@ -266,10 +266,21 @@
++ // SMS_CheckMarioFlag(MARIO_FLAG_HAS_FLUDD), and a const reference to
++ // mNoticeActor->getPosition(). Any three leave it 8 short; not taken as a
++ // stack of temporaries, kept here as the lead.
+++#ifdef TARGET_PC
+++extern "C" int port_fludd_invert_x;
+++extern "C" int port_fludd_invert_y;
+++#endif
+++
++ void CPolarSubCamera::ctrlLButtonCamera_()
++ {
++ 	f32 stickX = -unk120->mCompSPos[4];
++ 	f32 stickY = -unk120->mCompSPos[5];
+++#ifdef TARGET_PC
+++	if (port_fludd_invert_x)
+++		stickX = -stickX;
+++	if (port_fludd_invert_y)
+++		stickY = -stickY;
+++#endif
++ 
++ 	if (mTargetFreezeFrames == 0) {
++ 		if (!SMS_CheckMarioFlag(MARIO_FLAG_HAS_FLUDD))
+diff --git a/decomp-patches/zzzz-ps5-02-camera-shake-scale.patch b/decomp-patches/zzzz-ps5-02-camera-shake-scale.patch
+new file mode 100644
+index 0000000..d60d4ae
+--- /dev/null
++++ b/decomp-patches/zzzz-ps5-02-camera-shake-scale.patch
+@@ -0,0 +1,23 @@
++Reason: port (PS5 settings menu): port_camera_shake scales the camera shake (the quakes of landings, bosses and rising buildings), for players who find the retail strength too much on a large screen; 1 is retail.
++--- a/src/Camera/camerashake.cpp	2026-10-13 21:50:37.327822209 +0100
+++++ b/src/Camera/camerashake.cpp	2026-10-13 21:50:37.334822224 +0100
++@@ -188,9 +188,19 @@
++ 	up->z = oldUp.x * rot.at(0, 2) + upY * rot.at(1, 2) + upZ * rot.at(2, 2);
++ }
++ 
+++#ifdef TARGET_PC
+++// SMS_CAMERA_SHAKE=percent (the PS5 settings menu): how far the camera shakes,
+++// 100 being the game's own; 0 holds it still.
+++extern "C" float port_camera_shake;
+++#endif
+++
++ static inline f32 CSWaveF(const TCameraShake::TCamShakeAngle& a, u16 frame)
++ {
+++#ifdef TARGET_PC
+++	return port_camera_shake * a.mAmp * JMASSin((s16)(a.mVel * frame));
+++#else
++ 	return a.mAmp * JMASSin((s16)(a.mVel * frame));
+++#endif
++ }
++ 
++ static inline f32 CSShortToDeg(s16 a)
+diff --git a/platform/audio/ai.cpp b/platform/audio/ai.cpp
+index c85815a..956cdf3 100644
+--- a/platform/audio/ai.cpp
++++ b/platform/audio/ai.cpp
+@@ -39,6 +39,14 @@
+ extern "C" int port_audio_dsp_frame_pending(void) __attribute__((weak));
+ extern "C" int GXPC_GetSpeed(void) __attribute__((weak));
+ extern "C" void port_dtk_mix(s16* lr, size_t frames, u32 outRate);
++#ifdef __PROSPERO__
++// The PS5 title links SDL2 statically: its functions by their own names, with
++// the minimal signatures below (no library to open, and no symbol table to ask).
++extern "C" int SDL_InitSubSystem(uint32_t);
++extern "C" uint32_t SDL_OpenAudioDevice(const char*, int, const void*, void*, int);
++extern "C" void SDL_PauseAudioDevice(uint32_t, int);
++extern "C" const char* SDL_GetError(void);
++#endif
+ 
+ namespace {
+ 
+@@ -221,6 +229,12 @@ void* null_clock(void*)
+ 
+ bool open_sdl()
+ {
++#ifdef __PROSPERO__
++	PFN_SDL_InitSubSystem init  = SDL_InitSubSystem;
++	PFN_SDL_OpenAudioDevice op  = (PFN_SDL_OpenAudioDevice)SDL_OpenAudioDevice;
++	PFN_SDL_PauseAudioDevice pa = SDL_PauseAudioDevice;
++	PFN_SDL_GetError err        = SDL_GetError;
++#else
+ #ifdef _WIN32
+ 	void* h = dlopen("SDL2.dll", RTLD_NOW | RTLD_GLOBAL);
+ #elif defined(__APPLE__)
+@@ -246,6 +260,7 @@ bool open_sdl()
+ 	PFN_SDL_GetError err        = (PFN_SDL_GetError)dlsym(h, "SDL_GetError");
+ 	if (!init || !op || !pa || !err)
+ 		return false;
++#endif
+ 	// SDL turns SIGINT/SIGTERM into an SDL_QUIT event; nothing pumps events in
+ 	// a headless run, so the process would ignore them. (No effect if the GX
+ 	// layer initialised SDL first; the user's own setting wins.)
+diff --git a/platform/gx/CMakeLists.txt b/platform/gx/CMakeLists.txt
+index 50a25d1..d97dde6 100644
+--- a/platform/gx/CMakeLists.txt
++++ b/platform/gx/CMakeLists.txt
+@@ -55,8 +55,10 @@ target_include_directories(sms_gx
+     ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
+ # macOS has no system GL/glcorearb.h; ship Khronos headers under third_party/.
+ # The GL thread's waits run the main run loop there (CoreFoundation).
+-if(APPLE)
++if(APPLE OR PS5)
+     target_include_directories(sms_gx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
++endif()
++if(APPLE)
+     target_link_libraries(sms_gx PUBLIC "-framework CoreFoundation")
+ endif()
+ target_compile_features(sms_gx PRIVATE cxx_std_17)
+diff --git a/platform/gx/include/sms_gx/gx_pc.h b/platform/gx/include/sms_gx/gx_pc.h
+index c5fbab1..756e426 100644
+--- a/platform/gx/include/sms_gx/gx_pc.h
++++ b/platform/gx/include/sms_gx/gx_pc.h
+@@ -217,6 +217,9 @@ void GXPC_OverlayToggle(void);
+ void GXPC_OverlayDraw(int winW, int winH);
+ void GXPC_OverlayFrame(void);  /* every display copy, presented or not: the overlay's frame clock */
+ int GXPC_OverlayVisible(void);
++/* 0 hides the overlay, 1 shows the frame rate alone, 2 shows all of it. */
++void GXPC_OverlaySetMode(int mode);
++int GXPC_OverlayMode(void);
+ /* Game speed multiplier (F7 while the overlay is open cycles 1, 2, 4, 10);
+  * VI retraces and host audio advance at this rate, including THP movies. */
+ void GXPC_CycleSpeed(void);
+diff --git a/platform/gx/src/gl_loader.cpp b/platform/gx/src/gl_loader.cpp
+index 706d986..f55c992 100644
+--- a/platform/gx/src/gl_loader.cpp
++++ b/platform/gx/src/gl_loader.cpp
+@@ -4,6 +4,7 @@
+ #include <cstdlib>
+ #include <cstring>
+ #include <vector>
++#include <utility>
+ #include "gx_internal.h"
+ #include "gx_glthread.h"
+ #include <type_traits>
+@@ -24,6 +25,14 @@ template <typename R, typename... A> struct Counted<R (*)(A...)> {
+     template <R (**Real)(A...), uint64_t* N> static R call(A... a) {
+         g_statGlCalls++;
+         (*N)++;
++#if defined(__PROSPERO__)
++        // N[1]: the time inside the driver, in timestamp-counter ticks
++        struct Timed {
++            uint64_t* total;
++            uint64_t from;
++            ~Timed() { *total += __builtin_ia32_rdtsc() - from; }
++        } timed{N + 1, __builtin_ia32_rdtsc()};
++#endif
+         return (*Real)(a...);
+     }
+ };
+@@ -54,6 +63,23 @@ void logTopCalls(uint32_t frames) {
+         len += snprintf(line + len, sizeof line - size_t(len), "%s%s %.0f", k ? ", " : "", s_counts[order[k]].name,
+                         double(delta(order[k])) / frames);
+     if (len) gx::logmsg("stats: GL calls/frame by entry point: %s", line);
++#if defined(__PROSPERO__)
++    {   // the same by time inside the driver: thousands of timestamp-counter ticks a frame
++        static uint64_t lastT[256];
++        auto ticks = [&](int i) { return s_counts[i].n[1] - lastT[i]; };
++        for (int i = 0; i < s_nCounts; i++) order[i] = i;
++        for (int i = 1; i < s_nCounts; i++)
++            for (int j = i; j > 0 && ticks(order[j]) > ticks(order[j - 1]); j--) std::swap(order[j], order[j - 1]);
++        uint64_t all = 0;
++        for (int i = 0; i < s_nCounts; i++) all += ticks(i);
++        len = snprintf(line, sizeof line, "all %.0f", double(all) / frames / 1000.0);
++        for (int k = 0; k < 10 && k < s_nCounts && ticks(order[k]); k++)
++            len += snprintf(line + len, sizeof line - size_t(len), ", %s %.0f", s_counts[order[k]].name,
++                            double(ticks(order[k])) / frames / 1000.0);
++        gx::logmsg("stats: kilo-ticks/frame in the GL driver by entry point: %s", line);
++        for (int i = 0; i < s_nCounts; i++) lastT[i] = s_counts[i].n[1];
++    }
++#endif
+     for (int i = 0; i < s_nCounts; i++) last[i] = *s_counts[i].n;
+ #else
+     (void)frames;
+@@ -75,10 +101,10 @@ bool load(void* (*getProc)(const char*)) {
+ #define SMS_GX_WRAP(type, name)                                   \
+         {                                                         \
+             static type real_##name;                              \
+-            static uint64_t n_##name;                             \
++            static uint64_t n_##name[2];                          \
+             real_##name = gx_##name;                              \
+-            gx_##name = &Counted<type>::template call<&real_##name, &n_##name>; \
+-            if (s_nCounts < 256) s_counts[s_nCounts++] = {#name, &n_##name}; \
++            gx_##name = &Counted<type>::template call<&real_##name, n_##name>; \
++            if (s_nCounts < 256) s_counts[s_nCounts++] = {#name, n_##name}; \
+         }
+         SMS_GX_GL_FUNCS(SMS_GX_WRAP)
+ #undef SMS_GX_WRAP
+diff --git a/platform/gx/src/gx_cheat_menu.cpp b/platform/gx/src/gx_cheat_menu.cpp
+index 4850248..268a683 100644
+--- a/platform/gx/src/gx_cheat_menu.cpp
++++ b/platform/gx/src/gx_cheat_menu.cpp
+@@ -7,6 +7,12 @@
+ #include <array>
+ #include <cmath>
+ #include <vector>
++#ifdef __PROSPERO__
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include "sms_gx/gx_pc.h"
++#endif
+ 
+ extern "C" int port_cheat_god_mode;
+ extern "C" int port_cheat_movement_speed;
+@@ -35,7 +41,46 @@ struct Option {
+     int count;
+ };
+ 
++#ifdef __PROSPERO__
++// The PS5's settings, ahead of the cheats: the console has no launcher and no
++// keyboard, so the touch pad's button opens this menu and the d-pad works it.
++// The display settings are the port's own start-up switches (SMS_GX_SCALE and
++// the rest), which it reads once: they are saved to
++// /app0/userdata/ps5-settings.txt, which the title's start-up reads into the
++// environment, and take effect at the next launch. The overlay and the heat
++// haze change at once.
++extern "C" __attribute__((weak)) int port_heat_haze;
++extern "C" __attribute__((weak)) void port_pad_set_invert(int bits);
++extern "C" __attribute__((weak)) int port_pad_get_invert(void);
++extern "C" __attribute__((weak)) float port_camera_shake;
++int s_ps5Shake = 100;
++const char* const kShakeNames[] = {"OFF", "HALF", "FULL"};
++const int kShakeValues[] = {0, 50, 100};
++int s_ps5StickX, s_ps5StickY, s_ps5CameraX, s_ps5CameraY;
++const char* const kOverlayNames[] = {"OFF", "MINIMAL", "FULL"};
++const int kOverlayValues[] = {0, 1, 2};
++int s_ps5Overlay, s_ps5Scale = 45, s_ps5Rate = 60, s_ps5Wide = 1, s_ps5Fxaa, s_ps5Haze = 1;
++const char* const kScaleNames[] = {"960p", "1440p", "1920p", "2160p"};
++const int kScaleValues[] = {20, 30, 40, 45};  // tenths of the GameCube's 480 lines
++const char* const kRateNames[] = {"30", "60"};
++const int kRateValues[] = {30, 60};
++const char* const kWideNames[] = {"4:3", "16:9"};
++#endif
++
+ const Option kOptions[] = {
++#ifdef __PROSPERO__
++    {"CONTROLS", "Invert FLUDD Aim X", &s_ps5StickX, kOnOffNames, kOnOffValues, 2},
++    {nullptr, "Invert FLUDD Aim Y", &s_ps5StickY, kOnOffNames, kOnOffValues, 2},
++    {nullptr, "Invert Camera X", &s_ps5CameraX, kOnOffNames, kOnOffValues, 2},
++    {nullptr, "Invert Camera Y", &s_ps5CameraY, kOnOffNames, kOnOffValues, 2},
++    {nullptr, "Camera Shake", &s_ps5Shake, kShakeNames, kShakeValues, 3},
++    {"DISPLAY", "Performance Overlay", &s_ps5Overlay, kOverlayNames, kOverlayValues, 3},
++    {nullptr, "Heat Haze", &s_ps5Haze, kOnOffNames, kOnOffValues, 2},
++    {nullptr, "Resolution *", &s_ps5Scale, kScaleNames, kScaleValues, 4},
++    {nullptr, "Frame Rate *", &s_ps5Rate, kRateNames, kRateValues, 2},
++    {nullptr, "Picture *", &s_ps5Wide, kWideNames, kOnOffValues, 2},
++    {nullptr, "Smoothing (FXAA) *", &s_ps5Fxaa, kOnOffNames, kOnOffValues, 2},
++#endif
+     {"PLAYER", "God Mode", &port_cheat_god_mode, kOnOffNames, kOnOffValues, 2},
+     {nullptr, "Infinite Lives", &port_cheat_infinite_lives, kOnOffNames, kOnOffValues, 2},
+     {nullptr, "Infinite FLUDD", &port_cheat_infinite_fludd, kOnOffNames, kOnOffValues, 2},
+@@ -139,6 +184,9 @@ Layout layoutFor(int winW, int winH) {
+     const int logicalWidth = kPad + labelW + kColumnGap + kBoxW + kPad;
+     const int logicalHeight = rowTop(kOptionCount) + kFooterH;
+     int glyph = std::max(2, (winH + 360) / 720);  // a font pixel is about a 720th of the height, at least 2 pixels
++#ifdef __PROSPERO__
++    glyph = std::max(glyph, winH / 432);  // read from a sofa: 5 at 2160 lines
++#endif
+     Layout l = placedAt(glyph, logicalWidth, logicalHeight, winW);
+     while (glyph > 1 && (l.x < 0 || l.y + l.height > winH))
+         l = placedAt(--glyph, logicalWidth, logicalHeight, winW);
+@@ -177,7 +225,11 @@ void rasterize(const Layout& l) {
+     fill(Rect{0, 0, w, h}, kPanelBg);
+     const Rect title = l.title();
+     fill(title, kTitleBg);
++#ifdef __PROSPERO__
++    text(l.at(kPad), l.textY(title), "Settings", kText);
++#else
+     text(l.at(kPad), l.textY(title), "Cheats", kText);
++#endif
+     text(l.at(l.logicalWidth - kPad - 5), l.textY(title), "X", kText);
+     for (int i = 0; i < kOptionCount; i++) {
+         const Option& o = kOptions[i];
+@@ -208,7 +260,11 @@ void rasterize(const Layout& l) {
+         }
+     }
+     const int footer = rowTop(kOptionCount) + 3;
++#ifdef __PROSPERO__
++    text(l.at(kPad), l.at(footer + 4), "* next launch    Touch pad: close", kTextDim);
++#else
+     text(l.at(kPad), l.at(footer + 4), "F9 Close Menu", kTextDim);
++#endif
+     // Hairlines stay one or two window pixels thick at any scale.
+     const int t = std::max(1, g / 2);
+     const int footerY = l.at(footer);
+@@ -288,13 +344,84 @@ bool onMouse(const SDL_Event& ev) {
+     return true;
+ }
+ 
++#ifdef __PROSPERO__
++// The settings as the environment has them, once.
++void ps5Load() {
++    static bool loaded = false;
++    if (loaded) return;
++    loaded = true;
++    if (const char* e = getenv("SMS_GX_SCALE")) {
++        const int tenths = int(atof(e) * 10.0 + 0.5);
++        int best = 0;
++        for (int i = 1; i < 4; i++)
++            if (abs(kScaleValues[i] - tenths) < abs(kScaleValues[best] - tenths)) best = i;
++        s_ps5Scale = kScaleValues[best];
++    }
++    if (const char* e = getenv("SMS_FRAME_RATE")) s_ps5Rate = atoi(e) == 30 ? 30 : 60;
++    if (const char* e = getenv("SMS_WIDESCREEN")) s_ps5Wide = *e && strcmp(e, "0") && strcmp(e, "off");
++    if (const char* e = getenv("SMS_FXAA")) s_ps5Fxaa = atoi(e) != 0;
++    if (&port_heat_haze) s_ps5Haze = port_heat_haze != 0;
++    s_ps5Overlay = GXPC_OverlayMode();
++    if (&port_camera_shake) s_ps5Shake = port_camera_shake < 0.25f ? 0 : port_camera_shake < 0.75f ? 50 : 100;
++    if (&port_pad_get_invert) {
++        const int bits = port_pad_get_invert();
++        s_ps5CameraX = bits & 1, s_ps5CameraY = bits >> 1 & 1, s_ps5StickX = bits >> 2 & 1, s_ps5StickY = bits >> 3 & 1;
++    }
++}
++
++// What changes at once, and the file the next launch reads.
++void ps5Apply() {
++    if (GXPC_OverlayMode() != s_ps5Overlay) GXPC_OverlaySetMode(s_ps5Overlay);
++    if (&port_pad_set_invert) port_pad_set_invert(s_ps5CameraX | s_ps5CameraY << 1 | s_ps5StickX << 2 | s_ps5StickY << 3);
++    if (&port_heat_haze) port_heat_haze = s_ps5Haze;
++    if (&port_camera_shake) port_camera_shake = float(s_ps5Shake) / 100.0f;
++    FILE* f = fopen("/app0/userdata/ps5-settings.txt", "w");
++    if (!f) return;
++    fprintf(f, "# Written by the in-game settings menu (the touch pad's button). env.txt overrides these.\n");
++    fprintf(f, "SMS_GX_SCALE=%d.%d\n", s_ps5Scale / 10, s_ps5Scale % 10);
++    fprintf(f, "SMS_FRAME_RATE=%d\n", s_ps5Rate);
++    fprintf(f, "SMS_WIDESCREEN=%s\n", s_ps5Wide ? "16:9" : "off");
++    fprintf(f, "SMS_FXAA=%d\n", s_ps5Fxaa);
++    fprintf(f, "SMS_HEAT_HAZE=%d\n", s_ps5Haze);
++    if (s_ps5Overlay) fprintf(f, "SMS_OVERLAY=%s\n", s_ps5Overlay == 1 ? "minimal" : "1");
++    fprintf(f, "SMS_FLUDD_INVERT_X=%d\nSMS_FLUDD_INVERT_Y=%d\n", s_ps5StickX, s_ps5StickY);
++    fprintf(f, "SMS_CAMERA_INVERT_X=%d\nSMS_CAMERA_INVERT_Y=%d\n", s_ps5CameraX, s_ps5CameraY);
++    fprintf(f, "SMS_CAMERA_SHAKE=%d\n", s_ps5Shake);
++    fclose(f);
++}
++#endif
++
+ }  // namespace
+ 
+ namespace gx {
+ 
+ bool cheatMenuVisible() { return s_visible; }
+ 
+-void cheatMenuToggle() { s_visible = !s_visible; }
++void cheatMenuToggle() {
++#ifdef __PROSPERO__
++    ps5Load();
++#endif
++    s_visible = !s_visible;
++}
++
++#ifdef __PROSPERO__
++// A controller button pressed while the menu is open: the d-pad moves and
++// changes, Cross steps through a row's choices, Circle closes.
++void cheatMenuPadButton(int button) {
++    if (!s_visible) return;
++    const Option& o = kOptions[s_selected];
++    switch (button) {
++    case SDL_CONTROLLER_BUTTON_DPAD_UP: s_selected = (s_selected + kOptionCount - 1) % kOptionCount; return;
++    case SDL_CONTROLLER_BUTTON_DPAD_DOWN: s_selected = (s_selected + 1) % kOptionCount; return;
++    case SDL_CONTROLLER_BUTTON_DPAD_LEFT: step(o, -1, false); break;
++    case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: step(o, 1, false); break;
++    case SDL_CONTROLLER_BUTTON_A: step(o, 1, true); break;
++    case SDL_CONTROLLER_BUTTON_B: s_visible = false; return;
++    default: return;
++    }
++    ps5Apply();
++}
++#endif
+ 
+ bool cheatMenuHandleEvent(const SDL_Event& ev) {
+     switch (ev.type) {
+diff --git a/platform/gx/src/gx_cheat_menu.h b/platform/gx/src/gx_cheat_menu.h
+index 1266390..f485fce 100644
+--- a/platform/gx/src/gx_cheat_menu.h
++++ b/platform/gx/src/gx_cheat_menu.h
+@@ -14,6 +14,10 @@ void cheatMenuToggle();
+ bool cheatMenuHandleEvent(const SDL_Event& ev);
+ // On the GL thread, between presenting the frame and the swap.
+ void cheatMenuRender(int winW, int winH);
++#ifdef __PROSPERO__
++// The PS5's menu is worked with the controller: an SDL_CONTROLLER_BUTTON_* press while it is open.
++void cheatMenuPadButton(int button);
++#endif
+ #else
+ inline bool cheatMenuVisible() { return false; }
+ inline void cheatMenuToggle() {}
+diff --git a/platform/gx/src/gx_glthread.cpp b/platform/gx/src/gx_glthread.cpp
+index 393b8f9..16f82e6 100644
+--- a/platform/gx/src/gx_glthread.cpp
++++ b/platform/gx/src/gx_glthread.cpp
+@@ -7,6 +7,10 @@
+ #include <condition_variable>
+ #include <mutex>
+ #include <thread>
++#ifdef __PROSPERO__
++#include <sys/param.h>
++#include <sys/cpuset.h>
++#endif
+ #ifdef __APPLE__
+ #include <CoreFoundation/CoreFoundation.h>
+ #include <pthread.h>
+@@ -100,8 +104,29 @@ template <class C> void mainWait(const C& cond) {
+     s_mainSleeping.store(false);
+ }
+ 
++#ifdef __PROSPERO__
++// The PS5 OpenGL SDK's driver prepares draws on two helper threads it pins to
++// CPUs 10 and 12, which spin while they wait, and expects the thread that
++// feeds them on CPU 8. SMS_PS5_GL_CPU=n pins this thread (the one that makes
++// the GL calls) to CPU n; -1 leaves it to the scheduler.
++void pinGlThread() {
++    const char* e = getenv("SMS_PS5_GL_CPU");
++    const int cpu = e ? atoi(e) : 8;
++    if (cpu < 0) return;
++    cpuset_t one;
++    CPU_ZERO(&one);
++    CPU_SET(cpu, &one);
++    // (the console takes a mask of 8 bytes, as the SDK's own pins pass, not sizeof(cpuset_t))
++    const int rc = cpuset_setaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, 8, &one);
++    logmsg("GL thread on CPU %d (%s)", cpu, rc == 0 ? "pinned" : "the console refused");
++}
++#endif
++
+ void threadMain(void (*bind)(void*), void* arg, std::atomic<int>* ready) {
+     t_onGl = true;
++#ifdef __PROSPERO__
++    pinGlThread();
++#endif
+     bind(arg);
+     signalFlag(*ready);
+     uint64_t tail = s_tail.load();
+diff --git a/platform/gx/src/gx_hires.cpp b/platform/gx/src/gx_hires.cpp
+index bcd4174..3887f46 100644
+--- a/platform/gx/src/gx_hires.cpp
++++ b/platform/gx/src/gx_hires.cpp
+@@ -1049,6 +1049,9 @@ static bool beginUpload(Upload& u) {
+ // Sends u's levels, at least one piece and then while `sent` is under
+ // `allowance`; true once they are all in. A completion's levels already have
+ // their storage (finishUpload), so they only fill it.
++// A load sends each level in one call where pieces cost more than they save:
++// the PS5's driver takes a piece of a level about as slowly as the whole of it.
++static bool s_wholeLevels = false;
+ static bool sendLevels(Upload& u, int unit, size_t allowance, size_t* sent) {
+     Loaded* L = u.item.image.get();
+     const bool fill = u.item.request.kind == REST;
+@@ -1062,7 +1065,7 @@ static bool sendLevels(Upload& u, int unit, size_t allowance, size_t* sent) {
+         const int n = L->first + int(u.level);
+         const int lw = std::max(1, L->w >> n), lh = std::max(1, L->h >> n);
+         size_t bytes = lv.size();
+-        if (u.offset == 0 && bytes <= kPiece && !fill) {
++        if (u.offset == 0 && (bytes <= kPiece || s_wholeLevels) && !fill) {
+             if (L->compressed)
+                 glCompressedTexImage2D(GL_TEXTURE_2D, n, L->compressed, lw, lh, 0, GLsizei(bytes), lv.data());
+             else
+@@ -1212,13 +1215,23 @@ static bool takeDecoded(Upload& u, bool pack) {  // with s_mu held
+ // Sends decoded textures into GL: all of the ones resources asked for when
+ // `wait` (a load: until none is left to decode), else up to a frame's
+ // allowance, or 2 ms. The whole pack's wait for loads (uploadPack).
++static double s_loadWaitMs, s_loadSendMs, s_loadBeginMs;  // a load's time by step, for its log line
+ static void uploadPending(bool wait) {
+     using Clock = std::chrono::steady_clock;
++    auto ms = [](Clock::time_point a) { return std::chrono::duration<double, std::milli>(Clock::now() - a).count(); };
+     const auto start = Clock::now();
+     const size_t allowance = wait ? SIZE_MAX : frameUploadBudget();
+     size_t sent = 0;
+     exchangeRest(wait);
++    auto shown = start;
++    int step = 0;
+     for (;;) {
++        // a load that takes long says so (the PS5 takes a pack's textures slowly)
++        if (wait && Clock::now() - shown >= std::chrono::milliseconds(step ? 300 : 400)) {
++            loadingScreen(step++);
++            glcInvalidate();
++            shown = Clock::now();
++        }
+         if (s_uploads.empty()) {
+             Upload u;
+             {
+@@ -1226,10 +1239,14 @@ static void uploadPending(bool wait) {
+                 if (wait) lk.lock();
+                 else if (!lk.try_lock()) break;
+                 auto loaded = [] { return s_decodedDemand == 0 && s_queue.empty() && !s_busy; };
++                const auto t0 = Clock::now();
+                 if (wait) s_cv.wait(lk, [&] { return s_decoded.size() > s_decodedPack || loaded(); });
++                s_loadWaitMs += ms(t0);
+                 if ((wait && loaded()) || !takeDecoded(u, false)) break;
+             }
++            const auto t1 = Clock::now();
+             if (beginUpload(u)) s_uploads.push_back(std::move(u));
++            s_loadBeginMs += ms(t1);
+             continue;
+         }
+         Upload& u = s_uploads.front();
+@@ -1237,11 +1254,14 @@ static void uploadPending(bool wait) {
+             s_uploads.pop_front();
+             continue;
+         }
+-        if (sendLevels(u, 0, allowance, &sent)) {
++        const auto t2 = Clock::now();
++        const bool whole = sendLevels(u, 0, allowance, &sent);
++        if (whole) {
+             finishUpload(u, 0);
+             if (wait && u.item.request.kind != REST) s_fresh.push_back(u.tex);
+             s_uploads.pop_front();
+         }
++        if (wait) s_loadSendMs += ms(t2);
+         if (!wait && (sent >= allowance || Clock::now() - start >= std::chrono::milliseconds(2))) break;
+     }
+ }
+@@ -1325,20 +1345,32 @@ static void touchFresh() {
+     glcInvalidate();
+ }
+ 
++size_t hiresResidentBytes() { return s_bytes; }
++
+ void hiresPreload() {
+     if (s_state != 1 || !preloading()) return;
+     const auto start = std::chrono::steady_clock::now();
+     uint32_t before = s_uploaded;
++    s_loadWaitMs = s_loadSendMs = s_loadBeginMs = 0;
++#ifdef __PROSPERO__
++    s_wholeLevels = !(getenv("SMS_PS5_TEXTURE_PIECES") && atoi(getenv("SMS_PS5_TEXTURE_PIECES")));
++#endif
+     uploadPending(true);
++    s_wholeLevels = false;
++    const auto sentAt = std::chrono::steady_clock::now();
+     if (preloadMode() == 2) uploadPack(1500);
+     // The GL thread takes what was sent while the level still loads, so the
+     // first frame does not wait for it.
+     touchFresh();
+     glt::finish();
+-    if (s_uploaded != before)
++    if (s_uploaded != before) {
+         logmsg("texture pack: prepared %u replacements before gameplay in %.1f ms (%zu MiB resident)",
+                s_uploaded - before,
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count(), s_bytes >> 20);
++        logmsg("texture pack: of that, %.0f ms waiting for the decoder, %.0f ms creating, %.0f ms sending, %.0f ms for the GPU to take them",
++               s_loadWaitMs, s_loadBeginMs, s_loadSendMs,
++               std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - sentAt).count());
++    }
+ }
+ 
+ // Once a display frame: over the memory budget (SMS_TEXTURE_PACK_MB, 1536
+diff --git a/platform/gx/src/gx_internal.h b/platform/gx/src/gx_internal.h
+index 88b4c57..d204cf6 100644
+--- a/platform/gx/src/gx_internal.h
++++ b/platform/gx/src/gx_internal.h
+@@ -284,7 +284,12 @@ void shaderPrepareStage(int stage);  // while a stage loads: its programs (the w
+ // ---------------------------------------------------------------- overlay panels
+ // Each slot keeps its own texture, so panels drawn in the same frame keep their
+ // cached bitmaps. GXPC_DrawOverlay draws the debug overlay's slot.
+-enum OverlaySlot { OVERLAY_DEBUG, OVERLAY_CHEAT_MENU, OVERLAY_WARP_MENU, OVERLAY_SLOTS };
++enum OverlaySlot { OVERLAY_DEBUG, OVERLAY_CHEAT_MENU, OVERLAY_WARP_MENU, OVERLAY_LOADING, OVERLAY_SLOTS };
++// A black frame saying LOADING, shown from inside a long load (gx_platform.cpp);
++// `step` animates its dots.
++void loadingScreen(int step);
++size_t hiresResidentBytes();  // the texture pack's replacements held, for the statistics
++void drawLoadingFrame(int step, int winW, int winH);  // gx_render.cpp, on the GL thread
+ void drawOverlayPanel(OverlaySlot slot, const uint8_t* rgba, int w, int h, int x, int y, int scale, int winW, int winH);
+ // Panel bitmaps (gx_overlay.cpp): RGBA8, w x h, row 0 at the top. Text shares
+ // one scratch buffer, so panels are rasterised on the GL thread only.
+diff --git a/platform/gx/src/gx_overlay.cpp b/platform/gx/src/gx_overlay.cpp
+index d4cb8da..add238b 100644
+--- a/platform/gx/src/gx_overlay.cpp
++++ b/platform/gx/src/gx_overlay.cpp
+@@ -9,6 +9,7 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <algorithm>
+ #include <time.h>
+ #include <atomic>
+ #include <string>
+@@ -83,6 +84,7 @@ struct FrameClock {
+ } s_clock;
+ 
+ std::string s_renderer;
++bool s_minimal = false;  // the frame rate alone
+ 
+ }  // namespace
+ 
+@@ -128,10 +130,19 @@ extern "C" {
+ void GXPC_OverlayToggle(void) {
+     s_visible = !s_visible;
+     s_panelDirty = true;
+-    GXPC_SetDetailedTimers(s_visible);
++    GXPC_SetDetailedTimers(s_visible && !s_minimal);
+ }
+ int GXPC_OverlayVisible(void) { return s_visible; }
+ 
++// 0 hides the overlay, 1 shows the frame rate alone and 2 shows all of it.
++void GXPC_OverlaySetMode(int mode) {
++    s_visible = mode != 0;
++    s_minimal = mode == 1;
++    s_panelDirty = true;
++    GXPC_SetDetailedTimers(s_visible && !s_minimal);
++}
++int GXPC_OverlayMode(void) { return !s_visible ? 0 : s_minimal ? 1 : 2; }
++
+ void GXPC_CycleSpeed(void) { s_speedIndex.store((s_speedIndex.load() + 1) % int(sizeof kSpeeds / sizeof kSpeeds[0])); }
+ int GXPC_GetSpeed(void) { return kSpeeds[s_speedIndex.load()]; }
+ 
+@@ -142,7 +153,8 @@ void GXPC_OverlayDraw(int winW, int winH) {
+     if (!s_envChecked) {  // SMS_OVERLAY=1: start with the overlay open
+         s_envChecked = true;
+         const char* e = getenv("SMS_OVERLAY");
+-        if (e && *e && strcmp(e, "0") != 0 && !s_visible) GXPC_OverlayToggle();
++        if (e && !strcmp(e, "minimal")) GXPC_OverlaySetMode(1);  // the frame rate alone
++        else if (e && *e && strcmp(e, "0") != 0 && !s_visible) GXPC_OverlayToggle();
+     }
+     s_clock.shownFrames++;
+     if (!s_visible) return;
+@@ -170,6 +182,8 @@ void GXPC_OverlayDraw(int winW, int winH) {
+         double up = s_clock.last - s_clock.start;
+ 
+         char text[2048];
++        if (s_minimal) snprintf(text, sizeof text, "FPS %.0f", s_clock.fps);
++        else
+         snprintf(text, sizeof text,
+                  "FPS %.1f (%.1f shown)   frame %.1f ms avg, %.1f ms worst   speed x%d\n"
+                  "ms/frame: game %.1f  GX %.1f  present %.1f  swap %.1f  idle %.1f\n"
+@@ -180,6 +194,9 @@ void GXPC_OverlayDraw(int winW, int winH) {
+                  "frames %u   up %d:%02d\n"
+                  "window %dx%d\n"
+                  "GL %s\n"
++#ifdef __PROSPERO__  // no keyboard on the console: the touch pad's button opens the settings menu
++                 "Touch pad: settings",
++#else
+                  "\n"
+                  "KEYS (defaults, see bindings.txt)\n"
+                  "Stick: arrows or WASD (hold LCtrl for half)\n"
+@@ -191,6 +208,7 @@ void GXPC_OverlayDraw(int winW, int winH) {
+                  "`: this overlay     F7: speed x1/x2/x4/x10\n"
+                  "F8 or Select: warp menu     F9: cheat menu\n"
+                  "Esc: quit",
++#endif
+                  s_clock.fps, s_clock.shownFps, s_clock.avgMs, s_clock.maxMs, GXPC_GetSpeed(), s_clock.gameMs, s_clock.per.gx,
+                  s_clock.per.present, s_clock.per.swap, s_clock.per.idle, s_clock.per.vertices, s_clock.per.draws,
+                  s_clock.per.textures, s_clock.per.copies, s_clock.per.peeks, s_clock.per.gpuWait, st.draws, st.vertices, st.efbCopies,
+@@ -220,6 +238,9 @@ void GXPC_OverlayDraw(int winW, int winH) {
+     }
+ 
+     int scale = winH >= 720 ? 3 : 2;
++#ifdef __PROSPERO__
++    scale = std::max(scale, winH / 432);  // read from a sofa: 5 at 2160 lines
++#endif
+     while (scale > 1 && (w * scale > winW || h * scale > winH)) scale--;
+     GXPC_DrawOverlay(upload, w, h, 8, 8, scale, winW, winH);
+ }
+diff --git a/platform/gx/src/gx_platform.cpp b/platform/gx/src/gx_platform.cpp
+index 23778b5..e39c1f3 100644
+--- a/platform/gx/src/gx_platform.cpp
++++ b/platform/gx/src/gx_platform.cpp
+@@ -37,6 +37,15 @@
+ #include <EGL/egl.h>
+ #include <EGL/eglext.h>
+ #endif
++#ifdef __PROSPERO__
++#include <atomic>
++#include <pthread.h>
++#include <signal.h>
++// A PNG writer of this file's own (gx_hires.cpp's is static too)
++#define STB_IMAGE_WRITE_STATIC
++#define STB_IMAGE_WRITE_IMPLEMENTATION
++#include "third_party/stb_image_write.h"
++#endif
+ 
+ namespace gx {
+ extern void (*g_displayCopyHook)(const void* xfb);
+@@ -598,10 +607,86 @@ void dumpFrame(const void* xfb) {
+     fclose(f);
+ }
+ 
++#ifdef __PROSPERO__
++// PS5 DevLoop (a development payload on the console) asks the title for its
++// own picture by creating /app0/devloop-shot: removing that file is the check,
++// one system call that fails on every ordinary run. The frame goes to a folder
++// that holds nothing else, as a PNG. /app0/devloop-quit asks the title to leave.
++void devloopFrame(const void* xfb) {
++    if (s_frame % 4) return;
++    if (unlink("/app0/devloop-quit") == 0) {
++        logmsg("devloop: asked to quit");
++        exit(0);
++    }
++    if (unlink("/app0/devloop-shot") != 0) return;
++    int w = 0, h = 0;
++    if (!GXPC_ReadXFB(xfb, nullptr, &w, &h)) return;
++    std::vector<uint8_t> px(size_t(w) * h * 4);
++    GXPC_ReadXFB(xfb, px.data(), &w, &h);
++    for (size_t i = 3; i < px.size(); i += 4) px[i] = 255;
++    char path[256];
++    snprintf(path, sizeof path, "/app0/userdata/screenshots/frame_%06u.png", s_frame);
++    if (!stbi_write_png(path, w, h, 4, px.data(), w * 4)) logmsg("devloop: cannot write %s", path);
++    else chmod(path, 0666);
++}
++#endif
++
++#ifdef __PROSPERO__
++// A stalled game, on a console with no debugger: with SMS_PS5_HANG_SECONDS=n in
++// the environment, a watchdog thread sends SIGSEGV to the thread that presents
++// frames once no frame has come for n seconds. Nothing handles the signal, so
++// the console writes its crash record for that thread, registers and backtrace,
++// which says where the game is waiting.
++extern "C" __attribute__((weak)) int port_os_hang_report(pthread_t* running);
++pthread_t s_frameThread;
++std::atomic<uint32_t> s_framesSeen{0};
++void* hangWatch(void* arg) {
++    const int limit = int(intptr_t(arg));
++    uint32_t last = 0;
++    int still = 0;
++    for (;;) {
++        sleep(1);
++        const uint32_t now = s_framesSeen.load();
++        still = now == last ? still + 1 : 0;
++        last = now;
++        if (still == limit) {
++            // the thread the game's scheduler has given the CPU to, if that is
++            // not the one that presents: that is the one not giving it back
++            pthread_t running;
++            const bool other = port_os_hang_report && port_os_hang_report(&running);
++            logmsg("hang watch: no frame for %d s after %u frames; stopping the %s thread for its backtrace", limit,
++                   now, other ? "running game" : "frame");
++            // (SMS_PS5_HANG_KILL=frame stops the presenting thread instead; =0 only reports)
++            const char* k = getenv("SMS_PS5_HANG_KILL");
++            if (k && !strcmp(k, "0")) continue;
++            sleep(1); // let the report reach the log first
++            pthread_kill(other && !(k && !strcmp(k, "frame")) ? running : s_frameThread, SIGSEGV);
++        }
++    }
++    return nullptr;
++}
++void hangWatchFrame() {
++    static bool started = false;
++    s_frameThread = pthread_self();
++    s_framesSeen++;
++    if (started) return;
++    started = true;
++    const char* e = getenv("SMS_PS5_HANG_SECONDS");
++    if (!e || atoi(e) <= 0) return;
++    pthread_t thread;
++    pthread_create(&thread, nullptr, hangWatch, (void*)intptr_t(atoi(e)));
++    logmsg("hang watch: on, %d s", atoi(e));
++}
++#endif
++
+ void onDisplayCopy(const void* xfb) {
+     s_frame++;
+     GXPC_OverlayFrame();
+     dumpFrame(xfb);
++#ifdef __PROSPERO__
++    devloopFrame(xfb);
++    hangWatchFrame();
++#endif
+     const bool skip = s_skipPresent && s_presentCost >= kSkipPresentCost;
+     s_skipPresent = false;
+     s_lastPresent = 0;
+@@ -737,6 +822,27 @@ int GXPC_InitAuto(float efbScale) {
+     return 0;
+ }
+ 
++// What a long texture load shows instead of a frozen black frame: the game
++// draws nothing while its replacements go to the GPU (several seconds for a
++// texture pack on the PS5).
++extern "C++" {
++namespace gx {
++void loadingScreen(int step) {
++#ifdef SMS_GX_HAVE_SDL2
++    if (s_mode != MODE_WINDOW || !s_window) return;
++    int w = 0, h = 0;
++    SDL_GL_GetDrawableSize(s_window, &w, &h);
++    glt::sync([&] {
++        drawLoadingFrame(step, w, h);
++        SDL_GL_SwapWindow(s_window);
++    });
++#else
++    (void)step;
++#endif
++}
++}  // namespace gx
++}  // extern "C++"
++
+ void GXPC_Present(const void* xfb) {
+ #ifdef SMS_GX_HAVE_SDL2
+     if (s_mode == MODE_WINDOW && s_window) {
+@@ -864,6 +970,25 @@ void sms_gx_pump_events(void) {
+             }
+             continue;
+         }
++#ifdef __PROSPERO__
++        // The touch pad's button (the pad driver's "back") opens and closes the
++        // settings menu; while it is open the controller's presses are the
++        // menu's. Releases still reach the pad layer, so nothing stays held.
++        if (ev.type == SDL_CONTROLLERBUTTONDOWN || ev.type == SDL_CONTROLLERBUTTONUP) {
++            if (ev.cbutton.button == SDL_CONTROLLER_BUTTON_BACK) {
++                if (ev.type == SDL_CONTROLLERBUTTONDOWN) {
++                    if (warpMenuVisible()) warpMenuToggle();
++                    cheatMenuToggle();
++                    syncMenuInput();
++                }
++                continue;
++            }
++            if (cheatMenuVisible() && ev.type == SDL_CONTROLLERBUTTONDOWN) {
++                cheatMenuPadButton(ev.cbutton.button);
++                continue;
++            }
++        }
++#endif
+         // F8 or a controller's Back (Select) button opens the warp menu while
+         // the debug overlay is open, and closes it; a press that does either
+         // is kept from the pad layer, release included. Otherwise they reach
+diff --git a/platform/gx/src/gx_render.cpp b/platform/gx/src/gx_render.cpp
+index dae542e..b985d17 100644
+--- a/platform/gx/src/gx_render.cpp
++++ b/platform/gx/src/gx_render.cpp
+@@ -14,9 +14,25 @@
+ #include <stdlib.h>
+ #include <time.h>
+ #include <string.h>
++#include <string>
+ #include <atomic>
+ #include <unordered_map>
+ 
++#ifdef __PROSPERO__
++#include <sys/resource.h>
++extern "C" __attribute__((weak)) int port_os_thread_counts(int* hosts);
++namespace gx {
++static size_t pixPendingPeakForStats();
++static size_t pixPoolSizeForStats();
++}
++extern "C" {
++int64_t sceKernelGetDirectMemorySize(void);
++int32_t sceKernelAvailableDirectMemorySize(int64_t searchStart, int64_t searchEnd, size_t alignment, int64_t* start, size_t* size);
++int32_t sceKernelAvailableFlexibleMemorySize(size_t* available);
++int32_t sceKernelConfiguredFlexibleMemorySize(size_t* configured);
++}
++#endif
++
+ namespace gx {
+ 
+ uint32_t g_statTexUploads, g_statShaderCompiles;
+@@ -365,7 +381,36 @@ void traceProbe();
+ void (*g_displayCopyHook)(const void* xfb) = nullptr;
+ bool rendererReady() { return s_ready; }
+ 
++// The full-screen passes' quad, whose corners the vertex shader makes from
++// gl_VertexID. The PS5 OpenGL SDK's driver only queues triangle lists: a strip
++// leaves its batch, and the driver then finishes everything queued before it
++// draws, about ten times a frame. So the PS5 draws two triangles, and
++// compileProgram gives the shaders six corners (0 1 2, 2 1 3) for them.
++static inline void drawQuad() {
++#ifdef __PROSPERO__
++    glDrawArrays(GL_TRIANGLES, 0, 6);
++#else
++    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
++#endif
++}
++
++static GLuint compileProgramRaw(const char* vs, const char* fs);
+ static GLuint compileProgram(const char* vs, const char* fs) {
++#ifdef __PROSPERO__
++    static const char kStrip[] = "vec2 p = vec2(float(gl_VertexID & 1), float(gl_VertexID >> 1));";
++    static const char kList[] =
++        "int q = gl_VertexID < 3 ? gl_VertexID : (gl_VertexID == 3 ? 2 : (gl_VertexID == 4 ? 1 : 3));\n"
++        "  vec2 p = vec2(float(q & 1), float(q >> 1));";
++    std::string source(vs);
++    const size_t at = source.find(kStrip);
++    if (at != std::string::npos) {
++        source.replace(at, sizeof kStrip - 1, kList);
++        return compileProgramRaw(source.c_str(), fs);
++    }
++#endif
++    return compileProgramRaw(vs, fs);
++}
++static GLuint compileProgramRaw(const char* vs, const char* fs) {
+     auto sh = [](GLenum t, const char* src) {
+         GLuint s = glCreateShader(t);
+         glShaderSource(s, 1, &src, nullptr);
+@@ -1007,7 +1052,7 @@ static void postPresent(GLuint tex, int w, int h, int ox, int oy, int vw, int vh
+         glUniform2f(s_fxaaURcp, 1.0f / float(w), 1.0f / float(h));
+         glUniform1i(s_fxaaUFlip, 0);
+         glBindTexture(GL_TEXTURE_2D, tex);
+-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
++        drawQuad();
+         tex = s_postTex;
+     }
+     if (s_post.filter == 4 && (vw > w || vh > h)) {
+@@ -1032,7 +1077,7 @@ static void postPresent(GLuint tex, int w, int h, int ox, int oy, int vw, int vh
+         glBindTexture(GL_TEXTURE_2D, s_nisCoef);
+         glActiveTexture(GL_TEXTURE0);
+         glBindTexture(GL_TEXTURE_2D, tex);
+-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
++        drawQuad();
+         glBindVertexArray(s_vao);
+         return;
+     }
+@@ -1059,7 +1104,7 @@ static void postPresent(GLuint tex, int w, int h, int ox, int oy, int vw, int vh
+         glUniform2f(s_easuUSrc, float(w), float(h));
+         glUniform1i(s_easuUFlip, 1);  // XFB row 0 is the top; the window's row 0 is its bottom
+         glBindTexture(GL_TEXTURE_2D, tex);
+-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
++        drawQuad();
+         glBindFramebuffer(GL_FRAMEBUFFER, g_presentFbo);
+         glViewport(ox, oy, vw, vh);
+         glUseProgram(s_rcasProg);
+@@ -1069,7 +1114,7 @@ static void postPresent(GLuint tex, int w, int h, int ox, int oy, int vw, int vh
+         glUniform1f(s_rcasUGamma, s_post.gamma);
+         glUniform1i(s_rcasUFlip, 0);
+         glBindTexture(GL_TEXTURE_2D, s_fsrTex);
+-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
++        drawQuad();
+         glBindVertexArray(s_vao);
+         return;
+     }
+@@ -1083,7 +1128,7 @@ static void postPresent(GLuint tex, int w, int h, int ox, int oy, int vw, int vh
+     glUniform1f(s_scaleUGamma, s_post.gamma);
+     glUniform1i(s_scaleUFlip, 1);  // XFB row 0 is the top; the window's row 0 is its bottom
+     glBindTexture(GL_TEXTURE_2D, tex);
+-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
++    drawQuad();
+     glBindVertexArray(s_vao);
+ }
+ 
+@@ -1693,6 +1738,45 @@ static void statsFrame() {
+            double(g_statTexHashBytes - hash0) / 1024.0 / frames, double(g_statTexInvalidates - inv0) / frames,
+            (g_decodeSeconds - dec0) * 1000.0 / frames, ((s_idleClock ? s_idleClock() : 0) - idle0) * 1000.0 / frames);
+     gl::logTopCalls(frames);
++#ifdef __PROSPERO__
++    {  // how many cores the whole title kept busy: the driver's two helpers spin on theirs, so about three is its rest
++        static double cpu0 = 0, wall0 = 0;
++        struct rusage ru = {};
++        getrusage(RUSAGE_SELF, &ru);
++        const double cpu = double(ru.ru_utime.tv_sec + ru.ru_stime.tv_sec) + double(ru.ru_utime.tv_usec + ru.ru_stime.tv_usec) * 1e-6;
++        const double sys = double(ru.ru_stime.tv_sec) + double(ru.ru_stime.tv_usec) * 1e-6;
++        static double sys0 = 0;
++        const double wall = nowSeconds();
++        int hosts = 0;
++        const int threads = &port_os_thread_counts ? port_os_thread_counts(&hosts) : -1;
++        if (wall0 > 0 && wall > wall0)
++            logmsg("stats: %.2f cores busy (%.2f in the kernel), %d game threads on %d host threads, %ld MiB resident at most",
++                   (cpu - cpu0) / (wall - wall0), (sys - sys0) / (wall - wall0), threads, hosts, long(ru.ru_maxrss / 1024));
++        size_t flexFree = 0, flexAll = 0, directFree = 0;
++        int64_t directAt = 0;
++        const int64_t directAll = sceKernelGetDirectMemorySize();
++        sceKernelAvailableFlexibleMemorySize(&flexFree);
++        sceKernelConfiguredFlexibleMemorySize(&flexAll);
++        sceKernelAvailableDirectMemorySize(0, directAll, 0x10000, &directAt, &directFree);
++        // every free piece, not only the largest: what the driver gives back is scattered
++        size_t directSum = 0;
++        int pieces = 0;
++        for (int64_t from = 0; from < directAll && pieces < 4096; pieces++) {
++            int64_t at = 0;
++            size_t n = 0;
++            if (sceKernelAvailableDirectMemorySize(from, directAll, 0x4000, &at, &n) != 0 || !n) break;
++            directSum += n;
++            from = at + int64_t(n);
++        }
++        logmsg("stats: pixel-count queries: %zu pending at most, %zu pooled", pixPendingPeakForStats(), pixPoolSizeForStats());
++        logmsg("stats: memory: flexible %zu of %zu MiB free, direct %zu MiB free in its largest piece of %lld MiB, texture pack %zu MiB, direct free in all %zu MiB in %d pieces",
++               flexFree >> 20, flexAll >> 20, directFree >> 20, (long long)(directAll >> 20), hiresResidentBytes() >> 20,
++               directSum >> 20, pieces);
++        cpu0 = cpu;
++        sys0 = sys;
++        wall0 = wall;
++    }
++#endif
+     dec0 = g_decodeSeconds;
+     idle0 = s_idleClock ? s_idleClock() : 0;
+     gl0 = gl::g_statGlCalls;
+@@ -1900,13 +1984,33 @@ static void prefetchMetrics() {
+     }
+ }
+ 
++// A count the game starts and neither reads nor clears (one runs for as long as
++// Mario sleeps in the plaza) is paused and resumed several times a frame, each
++// time onto another query. Their number must not grow with the frames: the
++// oldest are added up and reused (they finished frames ago, so reading them
++// does not wait). The PS5's driver gives every query a buffer of its own, and
++// ten more a frame filled its buffer arena within minutes, after which every
++// draw's buffers came from the kernel one by one and the frame rate halved.
++static const size_t kPixPendingMax = 24, kPixPendingKeep = 8;
++static size_t s_pixPendingPeak = 0;
+ static void pixMetricPause() {
+     if (s_pixActive) {
+         glEndQuery(GL_SAMPLES_PASSED);
+         s_pixPending.emplace_back(s_pixCur, s_pixCurPooled);
+         s_pixTaint = true;  // this count now spans several queries
++        if (s_pixPending.size() > s_pixPendingPeak) s_pixPendingPeak = s_pixPending.size();
++        if (s_pixPending.size() >= kPixPendingMax) {
++            const size_t fold = s_pixPending.size() - kPixPendingKeep;
++            for (size_t i = 0; i < fold; i++) {
++                s_pixSamples += queryResult(s_pixPending[i].first);
++                if (s_pixPending[i].second) s_queryPool.push_back(s_pixPending[i].first);
++            }
++            s_pixPending.erase(s_pixPending.begin(), s_pixPending.begin() + long(fold));
++        }
+     }
+ }
++static size_t pixPendingPeakForStats() { return s_pixPendingPeak; }
++static size_t pixPoolSizeForStats() { return s_queryPool.size(); }
+ static void pixMetricResume() {
+     if (s_pixActive) {
+         s_pixCur = poolQuery();
+@@ -2297,7 +2401,7 @@ static int encodeCopy(GLuint tex, int ow, int oh, int tw, int th, uint32_t layou
+     glUniform1i(s_encULayout, GLint(layout));
+     glUniform1i(s_encUBytes, GLint(bytes));
+     glBindVertexArray(s_copyVao);
+-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
++    drawQuad();
+     glBindVertexArray(s_vao);
+     glBindFramebuffer(GL_READ_FRAMEBUFFER, s_encFbo);
+     glPixelStorei(GL_PACK_ALIGNMENT, 4);
+@@ -2574,7 +2678,7 @@ static void copyEfb(uint32_t ctrl) {
+         glUniform1i(s_copyUMode, GLint(mode));
+         glUniform1i(s_copyUAlphaOne, (g.bp[BP_PE_CONTROL] & 7) != 1);
+         glBindVertexArray(s_copyVao);
+-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
++        drawQuad();
+         glBindVertexArray(s_vao);
+         s_stats.efbCopies++;
+         writeBackCopy(dest, tex, ow, oh, tw, th, copyLayout(fmt, zcopy));
+@@ -2776,6 +2880,113 @@ static GLuint peekSource(bool depth) {
+     return s_peekFbo;
+ }
+ 
++#ifdef __PROSPERO__
++// The PS5's peeks (GXPeekZ and GXPeekARGB). Upstream's snapshot of the frame
++// costs the PS5 OpenGL SDK's driver dearly: it scales a depth blit on the CPU
++// ("software-blit depth-stencil=3843x2376->854x528", about 25 ms a frame at
++// 4.5 times the GameCube's resolution), it reads an image back through its
++// tiled layout one pixel at a time (the snapshot is 450,000 of them), and a
++// read of an image the frame's queued draws still write waits for the GPU.
++// Measured in Delfino Plaza: 6.6 ms of a 20 ms frame in glReadPixels.
++//
++// Here a snapshot is drawn, not blitted: one quad writes the EFB's colour, or
++// its depth as a 32-bit float, into a texture at the GameCube's size. There
++// are two per peek group and kind, taken in turn: a frame draws into one and
++// reads from the other, which the GPU finished a frame ago, and only the
++// pixel asked for. The game gets the previous frame's value, as it does from
++// upstream's snapshot.
++static uint32_t ps5Peek(int x, int y, bool depth) {
++    struct Snap {
++        GLuint fbo = 0, tex = 0;
++        uint32_t frame = ~0u;  // the frame that drew it
++    };
++    static Snap snap[2][kPeekGroups][2];
++    static bool have[kPeekGroups][2];
++    static GLuint prog[2];
++    const int cur = s_frameNo & 1, g = s_peekGroup, t = depth ? 1 : 0;
++    if (depth) {  // SMS_PS5_NO_PEEK=1 (a measurement): every depth peek answers "nothing in front"
++        static int off = -1;
++        if (off < 0) off = getenv("SMS_PS5_NO_PEEK") != nullptr;
++        if (off) return 0xFFFFFFFFu;
++    }
++    if (!(s_peekIssued & (1u << t))) {  // this group's first peek of this kind in the frame
++        s_peekIssued |= 1u << t;
++        if (!prog[t]) {
++            prog[t] = compileProgram(kCopyVs, depth ? R"(#version 330 core
++uniform sampler2D u_src;
++in vec2 v_uv;
++out vec4 o_color;
++void main() { o_color = vec4(texture(u_src, v_uv).r, 0.0, 0.0, 1.0); }
++)" : R"(#version 330 core
++uniform sampler2D u_src;
++in vec2 v_uv;
++out vec4 o_color;
++void main() { o_color = texture(u_src, v_uv); }
++)");
++            glUseProgram(prog[t]);
++            glUniform1i(glGetUniformLocation(prog[t], "u_src"), 0);
++            const GLfloat whole[4] = {0.0f, 0.0f, 1.0f, 1.0f};
++            glUniform4fv(glGetUniformLocation(prog[t], "u_rect"), 1, whole);
++        }
++        Snap& now = snap[cur][g][t];
++        if (!now.fbo) {
++            glGenTextures(1, &now.tex);
++            glBindTexture(GL_TEXTURE_2D, now.tex);
++            if (depth) glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, s_efbW, EFB_H, 0, GL_RED, GL_FLOAT, nullptr);
++            else glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, s_efbW, EFB_H, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
++            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
++            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
++            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
++            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
++            glGenFramebuffers(1, &now.fbo);
++            glBindFramebuffer(GL_FRAMEBUFFER, now.fbo);
++            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, now.tex, 0);
++        }
++        // s_efbColor or s_efbDepth now holds the current EFB
++        efbReadFbo(0, 0, INT32_MAX, INT32_MAX, depth ? GL_DEPTH_BUFFER_BIT : GL_COLOR_BUFFER_BIT);
++        glBindFramebuffer(GL_FRAMEBUFFER, now.fbo);
++        glViewport(0, 0, s_efbW, EFB_H);
++        glDisable(GL_SCISSOR_TEST);
++        glDisable(GL_BLEND);
++        glDisable(GL_COLOR_LOGIC_OP);
++        glDisable(GL_DEPTH_TEST);
++        glDisable(GL_CULL_FACE);
++        glDisable(GL_CLIP_DISTANCE0);
++        glDisable(GL_CLIP_DISTANCE0 + 1);
++        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
++        glUseProgram(prog[t]);
++        glActiveTexture(GL_TEXTURE0);
++        glBindTexture(GL_TEXTURE_2D, depth ? s_efbDepth : s_efbColor);
++        glBindSampler(0, 0);
++        glBindVertexArray(s_copyVao);
++        drawQuad();
++        glBindVertexArray(s_vao);
++        now.frame = s_frameNo;
++        const Snap& prev = snap[cur ^ 1][g][t];
++        have[g][t] = prev.fbo && prev.frame + 1 == s_frameNo;
++        glBindFramebuffer(GL_FRAMEBUFFER, s_efbFbo);
++        glcInvalidate();  // the game's next draw sets its own state again
++    }
++    if (!have[g][t]) return peekSync(x, y, depth);
++    uint32_t v = 0;
++    glBindFramebuffer(GL_FRAMEBUFFER, snap[cur ^ 1][g][t].fbo);
++    if (depth) {
++        float z = 0.0f;
++        glPixelStorei(GL_PACK_ALIGNMENT, 4);
++        glReadPixels(x, y, 1, 1, GL_RED, GL_FLOAT, &z);
++        // a float in 0..1, to the 32-bit depth a depth read gives
++        v = uint32_t(double(z < 0.0f ? 0.0f : z > 1.0f ? 1.0f : z) * 4294967295.0 + 0.5);
++    } else {
++        uint8_t px[4] = {0, 0, 0, 0};
++        glPixelStorei(GL_PACK_ALIGNMENT, 1);
++        glReadPixels(x, y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
++        v = uint32_t(px[0]) | uint32_t(px[1]) << 8 | uint32_t(px[2]) << 16 | uint32_t(px[3]) << 24;
++    }
++    glBindFramebuffer(GL_FRAMEBUFFER, s_efbFbo);
++    return v;
++}
++#endif
++
+ // Returns the raw texel: RGBA bytes packed little-endian, or the 32-bit depth.
+ static uint32_t peekRaw(int x, int y, bool depth) {
+     if (s_efbW != EFB_W && x >= 0) x = int((float(x) + 0.5f) * s_wide);  // the game camera's coordinates: stretched
+@@ -2791,6 +3002,9 @@ static uint32_t peekRaw(int x, int y, bool depth) {
+         s_peekIssued = 0;
+     }
+     if (s_peekGroup >= kPeekGroups) return peekSync(x, y, depth);
++#ifdef __PROSPERO__
++    return ps5Peek(x, y, depth);
++#endif
+     const GLsizeiptr bytes = GLsizeiptr(s_efbW) * EFB_H * 4;
+     int cur = s_frameNo & 1, t = depth ? 1 : 0;
+     if (!(s_peekIssued & (1u << t))) {
+@@ -2999,6 +3213,27 @@ void GXPC_DrawOverlay(const uint8_t* rgba, int w, int h, int x, int y, int scale
+ 
+ }  // extern "C"
+ 
++// The window black, with LOADING and its dots at the bottom right.
++void gx::drawLoadingFrame(int step, int winW, int winH) {
++    if (!s_ready) return;
++    static std::vector<uint8_t> px;
++    char text[16];
++    snprintf(text, sizeof text, "LOADING%.*s", step % 4, "...");
++    const int pad = 4, tw = overlayTextWidth("LOADING...") + pad * 2, th = 8 + pad * 2;
++    const uint8_t bg[4] = {0, 0, 0, 255}, fg[4] = {255, 220, 64, 255};
++    GLint fbo = 0;
++    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &fbo);
++    glBindFramebuffer(GL_FRAMEBUFFER, 0);
++    drawOverlayPanel(OVERLAY_LOADING, bg, 1, 1, 0, 0, std::max(winW, winH), winW, winH);
++    px.assign(size_t(tw) * th * 4, 0);
++    overlayFillRect(px, tw, th, 0, 0, tw, th, bg);
++    overlayText(px, tw, th, pad, pad, text, fg);
++    const int scale = std::max(3, winH / 240);
++    drawOverlayPanel(OVERLAY_LOADING, px.data(), tw, th, winW - (tw + 8) * scale, winH - (th + 6) * scale, scale, winW, winH);
++    glBindFramebuffer(GL_FRAMEBUFFER, GLuint(fbo));
++    glcInvalidate();
++}
++
+ void gx::drawOverlayPanel(OverlaySlot slot, const uint8_t* rgba, int w, int h, int x, int y, int scale, int winW, int winH) {
+     if (!s_ready || w <= 0 || h <= 0) return;
+     if (!rgba && (!s_overlayTex[slot] || w != s_overlayW[slot] || h != s_overlayH[slot])) return;
+@@ -3093,7 +3328,7 @@ void main() { o_color = texture(u_color, v_uv); }
+     float window[2] = {float(winW), float(winH)};
+     glUniform4fv(s_overlayRect, 1, rect);
+     glUniform2fv(s_overlayWindow, 1, window);
+-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
++    drawQuad();
+     glBindTexture(GL_TEXTURE_2D, GLuint(boundTex));
+     glActiveTexture(GLenum(activeUnit));
+     glPixelStorei(GL_UNPACK_ROW_LENGTH, rowLength);
+diff --git a/platform/misc/language.cpp b/platform/misc/language.cpp
+index 6332492..c41de72 100644
+--- a/platform/misc/language.cpp
++++ b/platform/misc/language.cpp
+@@ -71,7 +71,12 @@ extern "C" const char* port_language_pack_dir(void)
+ 	const Language* l = chosen();
+ 	if (l->index == 0)
+ 		return nullptr;
++#ifdef __PROSPERO__
++	// A PS5 title has no working directory: its own folder is /app0.
++	for (const char* base : { "/app0/mods/languages/" }) {
++#else
+ 	for (const char* base : { "mods/languages/", "../../mods/languages/" }) {
++#endif
+ 		std::string d = std::string(base) + l->code;
+ 		if (is_dir(d + "/files")) {
+ 			dir = d;
+diff --git a/platform/os/crash_info.cpp b/platform/os/crash_info.cpp
+index 56ff7cc..7d3826b 100644
+--- a/platform/os/crash_info.cpp
++++ b/platform/os/crash_info.cpp
+@@ -94,6 +94,10 @@ bool port_crash_read(void* to, uintptr_t from, size_t size)
+ 	vm_size_t copied = 0;
+ 	return vm_read_overwrite(mach_task_self(), (vm_address_t)from, size, (vm_address_t)to, &copied) == KERN_SUCCESS &&
+ 	       copied == size;
++#elif defined(__PROSPERO__)
++	// The PS5 has no call that reads memory without faulting.
++	(void)to; (void)from; (void)size;
++	return false;
+ #else
+ 	// The kernel checks the source and fails with EFAULT instead of faulting.
+ 	struct iovec local = {to, size}, remote = {(void*)from, size};
+diff --git a/platform/os/os_thread.cpp b/platform/os/os_thread.cpp
+index e676983..335167f 100644
+--- a/platform/os/os_thread.cpp
++++ b/platform/os/os_thread.cpp
+@@ -328,6 +328,19 @@ double mono_seconds()
+ 	return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+ }
+ 
++// port_os_nap: the thread that would not otherwise wait this frame, asleep
++// while the threads below it take their turn. It wakes when they have all
++// blocked again, or at g_nap_until.
++OSThreadQueue g_nap_queue;
++double g_nap_until;
++void nap_irq(void)
++{
++	if (g_nap_until != 0 && mono_seconds() >= g_nap_until) {
++		g_nap_until = 0;
++		OSWakeupThread(&g_nap_queue);
++	}
++}
++
+ // Give up the CPU if someone better is runnable (or, with `yield`, an equal).
+ // Blocks in the idle loop while nothing is runnable.
+ void reschedule(bool yield)
+@@ -340,6 +353,11 @@ void reschedule(bool yield)
+ 		next = pick(self, yield);
+ 		if (next)
+ 			break;
++		if (g_nap_until != 0) { // nobody else has work: the nap is over
++			g_nap_until = 0;
++			OSWakeupThread(&g_nap_queue);
++			continue;
++		}
+ 		// Idle: every thread is blocked. Wait for an interrupt source (or, with
+ 		// a deterministic clock, make the next retrace happen now).
+ 		if (port_vi_idle_advance())
+@@ -413,8 +431,37 @@ void* host_entry(void* p)
+ 	return NULL;
+ }
+ 
++} // namespace
++#ifdef __PROSPERO__
++// For the PS5 build's hang watch (platform/gx/src/gx_platform.cpp): every
++// OSThread's state to the log, and the host thread that owns the emulated CPU
++// (false when that is the boot thread, whose host this file did not create).
++// Read without g_cpu: the game is stalled, and whoever stalled it may hold it.
++extern "C" int port_os_hang_report(pthread_t* running)
++{
++	OSThread* cur = g_cur_spin.load();
++	port_log("[os] hang report: %u threads, the CPU is with %p, interrupts %s, in irq %d, scheduler disabled %d\n",
++	         (unsigned)g_threads.size(), (void*)cur, g_irq_enabled ? "on" : "off", (int)g_in_irq, g_sched_disabled);
++	for (size_t i = 0; i < g_threads.size(); i++) {
++		OSThread* t = g_threads[i];
++		Host* h = host_of(t);
++		port_log("[os]   %p%s priority %d state %d suspend %d queue %p started %d\n", (void*)t,
++		         t == &g_default_thread ? " (boot)" : "", (int)t->priority, (int)t->state, (int)t->suspend,
++		         (void*)t->queue, h ? (int)h->started : -1);
++	}
++	Host* h = cur ? host_of(cur) : NULL;
++	if (!h || !h->started || cur == &g_default_thread)
++		return 0;
++	*running = h->th;
++	return 1;
++}
++#endif
++namespace {
++
++int g_hosts_made; // for the statistics
+ Host* new_host()
+ {
++	g_hosts_made++;
+ 	Host* h = new Host();
+ 	pthread_cond_init(&h->cv, NULL);
+ 	h->irq_enabled = true;
+@@ -854,3 +901,37 @@ extern "C" void OSWaitCond(OSCond* c, OSMutex* m)
+ extern "C" void OSSignalCond(OSCond* c) { OSWakeupThread(&c->queue); }
+ 
+ extern "C" double port_idle_seconds(void) { return g_idle_seconds; }
++
++// For the statistics: the game's threads that have not exited, and the host
++// threads that exist for them (a retired incarnation's may linger).
++extern "C" int port_os_thread_counts(int* hosts)
++{
++	int live = 0;
++	for (size_t i = 0; i < g_threads.size(); i++)
++		if (g_threads[i]->state != OS_THREAD_STATE_MORIBUND && g_threads[i]->state != 0)
++			live++;
++	if (hosts)
++		*hosts = g_hosts_made;
++	return live;
++}
++
++// The running thread sleeps while lower-priority threads run, for at most
++// `seconds`: for a frame loop that found no time to wait for a retrace, whose
++// movie decoder, readers and the like would otherwise never run (the PS5 in a
++// heavy scene: the plaza gates' movie stood still while the gate was in view).
++extern "C" void port_os_nap(double seconds)
++{
++	static bool added = false;
++	if (seconds <= 0)
++		return;
++	BOOL lvl = OSDisableInterrupts();
++	if (!added) {
++		added = true;
++		OSInitThreadQueue(&g_nap_queue);
++		port_irq_add_source(nap_irq);
++	}
++	g_nap_until = mono_seconds() + seconds;
++	while (g_nap_until != 0)
++		OSSleepThread(&g_nap_queue);
++	OSRestoreInterrupts(lvl);
++}
+diff --git a/platform/pad/pad.cpp b/platform/pad/pad.cpp
+index ecc299e..2a64638 100644
+--- a/platform/pad/pad.cpp
++++ b/platform/pad/pad.cpp
+@@ -68,7 +68,13 @@ __attribute__((weak)) int GXPC_GameInputBlocked(void);
+ //   SMS_CAMERA_SPEED=percent   scales manual camera rotation (100 = retail)
+ //   SMS_FREE_CAMERA=1          the camera stays where it is put (no auto swing-back)
+ //   SMS_MOUSE_SENSITIVITY=%    mouse look speed, when the GX layer captures the mouse
++// SMS_FLUDD_INVERT_X / _Y=1 flip the main stick only where it aims FLUDD: the
++// aiming camera and the nozzle while spraying on the spot
++// (decomp-patches/zzzz-ps5-01-fludd-invert-y.patch).
+ extern "C" {
++int port_fludd_invert_x   = 0;
++int port_fludd_invert_y   = 0;
++float port_camera_shake = 1.0f; // SMS_CAMERA_SHAKE=percent, 100 the game's own (decomp-patches/zzzz-ps5-02-camera-shake-scale.patch)
+ int port_free_camera      = 0;
+ f32 port_camera_speed_x   = 1.0f;
+ f32 port_camera_speed_y   = 1.0f;
+@@ -664,6 +670,12 @@ void init()
+ 	parse_bindings(kDefaultBindings, "defaults");
+ 	g_invert_cx = env_on("SMS_CAMERA_INVERT_X");
+ 	g_invert_cy = env_on("SMS_CAMERA_INVERT_Y");
++	if (const char* e = getenv("SMS_CAMERA_SHAKE")) {
++		const float f = (float)atoi(e) / 100.0f;
++		port_camera_shake = f < 0.0f ? 0.0f : f > 1.0f ? 1.0f : f;
++	}
++	port_fludd_invert_x = env_on("SMS_FLUDD_INVERT_X");
++	port_fludd_invert_y = env_on("SMS_FLUDD_INVERT_Y");
+ 	if (g_invert_cx || g_invert_cy)
+ 		port_log("[pad] camera inverted:%s%s\n", g_invert_cx ? " X" : "", g_invert_cy ? " Y" : "");
+ 	const char* path = getenv("SMS_BINDINGS");
+@@ -736,8 +748,10 @@ void autopress_init()
+ 		g_auto.push_back(a);
+ 	}
+ 	// Headless runs have no SDL event loop: set the key state directly.
++#ifndef __PROSPERO__ // (a PS5 title has no symbol table to ask: the key state is set directly)
+ 	if (!(GXPC_IsHeadless && GXPC_IsHeadless()))
+ 		g_push = (PushEventFn)dlsym(RTLD_DEFAULT, "SDL_PushEvent");
++#endif
+ 	port_log("[pad] SMS_AUTOPRESS: %u scripted presses via %s\n", (unsigned)g_auto.size(),
+ 	         g_push ? "SDL_PushEvent (keyboard path)" : "direct key state");
+ }
+@@ -909,6 +923,20 @@ extern "C" u32 PADRead(PADStatus* status)
+ 	return PAD_CHAN0_BIT;
+ }
+ 
++// The inversions, changed while playing (the PS5's settings menu): bit 0 is
++// the camera's X, 1 its Y, 2 FLUDD's aim X, 3 its Y.
++extern "C" void port_pad_set_invert(int bits)
++{
++	g_invert_cx = bits & 1;
++	g_invert_cy = bits & 2;
++	port_fludd_invert_x = (bits & 4) != 0;
++	port_fludd_invert_y = (bits & 8) != 0;
++}
++extern "C" int port_pad_get_invert(void)
++{
++	return g_invert_cx | g_invert_cy << 1 | port_fludd_invert_x << 2 | port_fludd_invert_y << 3;
++}
++
+ // Mouse look: the motion since the last call, in C-stick units (1.0 is full
+ // deflection for one frame), with the camera's inversion applied. Returns 0
+ // when the mouse has not moved.
+diff --git a/platform/port_os.h b/platform/port_os.h
+index e3838ba..57faea6 100644
+--- a/platform/port_os.h
++++ b/platform/port_os.h
+@@ -12,6 +12,7 @@ void port_os_init(void);
+ void port_dvd_init(void);
+ void port_vi_init(void);
+ void port_noaudio_init(void);
++void port_os_nap(double seconds);  /* lower-priority threads' turn        */
+ int port_vi_idle_advance(void);   /* deterministic VI: retrace on idle */
+ int port_vi_deterministic(void);
+ s64 port_vi_virtual_ticks(void);
+diff --git a/platform/port_runtime.cpp b/platform/port_runtime.cpp
+index e2ccfa4..30ad8c1 100644
+--- a/platform/port_runtime.cpp
++++ b/platform/port_runtime.cpp
+@@ -73,6 +73,7 @@ int port_heat_haze = 1;
+ extern "C" float port_widescreen;
+ float port_widescreen = 1.0f;
+ extern "C" __attribute__((weak)) void GXPC_SetWidescreen(float widthOver43);
++extern "C" __attribute__((weak)) void GXPC_SetMemoryWindow(void* base, uint32_t size);
+ // SMS_FRAME_RATE: 30 (the game's own), 60 (default), or 120, for gameplay (the Application
+ // patch framerate-01 reads it; logos, menus and movies stay at 30).
+ extern "C" int port_frame_rate;
+@@ -137,6 +138,11 @@ extern "C" void port_stub_report(void)
+ #ifndef _WIN32
+ static void crash_symbolise(void** bt, int n)
+ {
++#ifdef __PROSPERO__
++	// A PS5 title cannot start another program: the console's own crash record
++	// is symbolised on the build machine.
++	(void)bt; (void)n;
++#else
+ 	char exe[512];
+ 	if (!realpath(port_crash_executable(), exe))
+ 		return;
+@@ -200,6 +206,7 @@ static void crash_symbolise(void** bt, int n)
+ 	}
+ 	if (pid > 0)
+ 		waitpid(pid, nullptr, 0);
++#endif
+ }
+ 
+ // Every general register, and what the hardware said about the fault.
+@@ -394,6 +401,8 @@ static void crash_handler(int sig, siginfo_t* si, void* uc)
+ 	line.text(" thread ");
+ #ifdef __linux__
+ 	line.number((uint64_t)syscall(SYS_gettid), 10);
++#elif defined(__PROSPERO__)
++	line.hex((uintptr_t)pthread_self());
+ #else
+ 	uint64_t thread_id = 0;
+ 	pthread_threadid_np(nullptr, &thread_id);
+@@ -457,6 +466,11 @@ void port_install_crash_handlers()
+ 	// Native hardware exceptions keep their Windows status. Translating them
+ 	// through a CRT signal handler would replace it with a generic abort code.
+ 	signal(SIGABRT, crash_handler);
++#elif defined(__PROSPERO__)
++	// The PS5 writes its own crash record (registers and a backtrace) when a
++	// title faults, and its shell then closes the title: a handler here would
++	// take that away.
++	(void)crash_handler;
+ #else
+ 	// The first backtrace() loads the unwinder, which allocates: do it now.
+ 	void* warm[1];
+@@ -487,6 +501,9 @@ static void* map_exact(void* want, size_t size)
+ #ifdef MAP_FIXED_NOREPLACE
+ 	void* p = mmap(want, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+ #else
++	// (The PS5 takes this path too. Its kernel places a block at the hint when
++	// that range is free and elsewhere when it is not, and does not honour
++	// MAP_EXCL: MAP_FIXED | MAP_EXCL replaced the C library mapped there.)
+ 	void* p = mmap(want, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+ #endif
+ 	if (p == want)
+@@ -506,7 +523,24 @@ static void map_mem1()
+ 		mb = (u32)atoi(e);
+ 	port_mem1_size = mb << 20;
+ 	void* want = (void*)(uintptr_t)0x80000000u;
+-#ifdef _WIN32
++#ifdef __PROSPERO__
++	// The PS5 loads a title's own C library (sce_module/libc.prx) at
++	// 0x80000000, so the game's memory cannot be there. It goes a little
++	// higher: below 4 GiB, so the game's pointers keep to their 32-bit slots,
++	// and still above 0x80000000, the line the game's own code draws between
++	// a pointer and a small number.
++	// The build's address macros (OSPhysicalToCached and the like) are compiled
++	// for that address: PORT_MEM1_REGION_PREFIX.
++	want    = (void*)((uintptr_t)PORT_MEM1_REGION_PREFIX << 16);
++	void* p = map_exact(want, port_mem1_size);
++	if (p != want) {
++		port_log("[port] cannot map MEM1 at %p\n", want);
++		exit(1);
++	}
++	// The graphics layer turns the game's "physical" addresses back into pointers.
++	if (GXPC_SetMemoryWindow)
++		GXPC_SetMemoryWindow(p, port_mem1_size);
++#elif defined(_WIN32)
+ 	void* p = VirtualAlloc(want, port_mem1_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+ 	if (p != want) {
+ 		port_log("[port] cannot map MEM1 at 0x80000000 (got %p)\n", p);
+@@ -572,6 +606,14 @@ void* port_low_alloc(unsigned long size)
+ #else
+ #ifdef MAP_32BIT
+ 	void* p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
++#ifdef __PROSPERO__
++	// The PS5's headers have the flag, but nothing says its kernel honours it:
++	// a block that came back above 2 GiB is given up for the address walk below.
++	if (p != MAP_FAILED && (uintptr_t)p + size > 0x80000000u) {
++		munmap(p, size);
++		p = MAP_FAILED;
++	}
++#endif
+ 	if (p != MAP_FAILED)
+ 		return p;
+ #endif
+diff --git a/platform/trace/trace_windows.cpp b/platform/trace/trace_windows.cpp
+index 4067508..19ad775 100644
+--- a/platform/trace/trace_windows.cpp
++++ b/platform/trace/trace_windows.cpp
+@@ -1,6 +1,6 @@
+-#if defined(_WIN32) || defined(__APPLE__)
++#if defined(_WIN32) || defined(__APPLE__) || defined(__PROSPERO__)
+ // Full lockstep tracing (trace.cpp) needs Linux ELF helpers. Empty stubs keep
+-// the weak call sites in vi.cpp / pad.cpp linking on Windows and macOS.
++// the weak call sites in vi.cpp / pad.cpp linking on Windows, macOS and the PS5.
+ #include "trace.h"
+ extern "C" volatile uint32_t port_trace_anchor = 0x54524143;
+ extern "C" void port_trace_on_retrace(uint32_t) {}
+diff --git a/platform/vi/vi.cpp b/platform/vi/vi.cpp
+index 3a13700..239f209 100644
+--- a/platform/vi/vi.cpp
++++ b/platform/vi/vi.cpp
+@@ -310,8 +310,19 @@ extern "C" s32 port_vi_frame_wait(s32 due, u16 frames)
+ 	const double entry = seconds_now();
+ 	if (ready > 0)
+ 		work += (entry - ready - (GXPC_LastPresentSeconds ? GXPC_LastPresentSeconds() : 0) - work) * 0.1;
+-	while ((s32)(VIGetRetraceCount() - due) < 0)
++	bool waited = false;
++	while ((s32)(VIGetRetraceCount() - due) < 0) {
+ 		VIWaitForRetrace();
++		waited = true;
++	}
++#ifdef __PROSPERO__
++	// A frame with no time left gives the game's other threads theirs anyway
++	// (what they use of it: a movie frame is a fraction of a millisecond).
++	if (!waited)
++		port_os_nap(0.003);
++#else
++	(void)waited;
++#endif
+ 	const s32 now = (s32)VIGetRetraceCount();
+ 	if (now - due > max_behind)
+ 		due = now;
