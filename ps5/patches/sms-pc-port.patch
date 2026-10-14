@@ -706,10 +706,215 @@ index 393b8f9..16f82e6 100644
      signalFlag(*ready);
      uint64_t tail = s_tail.load();
 diff --git a/platform/gx/src/gx_hires.cpp b/platform/gx/src/gx_hires.cpp
-index bcd4174..3887f46 100644
+index bcd4174..937d1c2 100644
 --- a/platform/gx/src/gx_hires.cpp
 +++ b/platform/gx/src/gx_hires.cpp
-@@ -1049,6 +1049,9 @@ static bool beginUpload(Upload& u) {
+@@ -348,6 +348,8 @@ static void queryFormats() {
+ // file's own mip levels, or 32-bit RGBA/BGRA. Blocks the GL cannot take are
+ // decoded here; the levels a file leaves out are made by completeChain.
+ enum { DDS_BC1 = BLOCK_BC1, DDS_BC2 = BLOCK_BC2, DDS_BC3 = BLOCK_BC3, DDS_BC7 = BLOCK_BC7, DDS_RGBA, DDS_BGRA };
++static const GLenum kGl[] = {0, 0x83F1, 0x83F2, 0x83F3, 0x8E8C};  // S3TC DXT1/3/5 RGBA, BPTC UNORM
++static bool gpuTakes(int fmt) { return (fmt >= DDS_BC1 && fmt <= DDS_BC3 && s_s3tc) || (fmt == DDS_BC7 && s_bptc); }
+ 
+ static bool readFile(const std::string& path, std::vector<uint8_t>& out) {
+     FILE* f = fopen(path.c_str(), "rb");
+@@ -392,8 +394,7 @@ static bool decodeDds(const std::string& path, Loaded* L) {
+     for (int m = std::max(w, h); m > 1; m >>= 1) full++;
+     // Supported blocks stay compressed whatever levels the file has: the
+     // missing ones are encoded in the same format (completeChain).
+-    bool gpu = (fmt <= DDS_BC3 && s_s3tc) || (fmt == DDS_BC7 && s_bptc);
+-    static const GLenum kGl[] = {0, 0x83F1, 0x83F2, 0x83F3, 0x8E8C};  // S3TC DXT1/3/5 RGBA, BPTC UNORM
++    bool gpu = gpuTakes(fmt);
+     L->w = w;
+     L->h = h;
+     L->compressed = gpu ? kGl[fmt] : 0;
+@@ -660,6 +661,23 @@ static std::vector<uint8_t> nextBlockLevel(int fmt, const std::vector<uint8_t>&
+     return dst;
+ }
+ 
++// The next level of an RGBA one (lw x lh), by the same 2x2 box filter.
++static std::vector<uint8_t> nextRgbaLevel(const std::vector<uint8_t>& src, int lw, int lh) {
++    int nw = std::max(1, lw / 2), nh = std::max(1, lh / 2);
++    std::vector<uint8_t> dst(size_t(nw) * nh * 4);
++    for (int y = 0; y < nh; y++)
++        for (int x = 0; x < nw; x++) {
++            int x0 = std::min(2 * x, lw - 1), x1 = std::min(2 * x + 1, lw - 1);
++            int y0 = std::min(2 * y, lh - 1), y1 = std::min(2 * y + 1, lh - 1);
++            for (int c = 0; c < 4; c++) {
++                int sum = src[(size_t(y0) * lw + x0) * 4 + c] + src[(size_t(y0) * lw + x1) * 4 + c] +
++                          src[(size_t(y1) * lw + x0) * 4 + c] + src[(size_t(y1) * lw + x1) * 4 + c];
++                dst[(size_t(y) * nw + x) * 4 + c] = uint8_t((sum + 2) / 4);
++            }
++        }
++    return dst;
++}
++
+ // Complete every replacement's mip chain down to 1x1 with 2x2 box filtering,
+ // whatever levels the pack supplied: the sampler minifies a replacement as far
+ // as its original (samplerFor), and without the lower levels a far wall
+@@ -683,22 +701,9 @@ static void completeChain(Loaded* L, bool idle = false) {
+         return;
+     }
+     while (lw > 1 || lh > 1) {
+-        int nw = std::max(1, lw / 2), nh = std::max(1, lh / 2);
+-        const std::vector<uint8_t>& src = L->levels.back();
+-        std::vector<uint8_t> dst(size_t(nw) * nh * 4);
+-        for (int y = 0; y < nh; y++)
+-            for (int x = 0; x < nw; x++) {
+-                int x0 = std::min(2 * x, lw - 1), x1 = std::min(2 * x + 1, lw - 1);
+-                int y0 = std::min(2 * y, lh - 1), y1 = std::min(2 * y + 1, lh - 1);
+-                for (int c = 0; c < 4; c++) {
+-                    int sum = src[(size_t(y0) * lw + x0) * 4 + c] + src[(size_t(y0) * lw + x1) * 4 + c] +
+-                              src[(size_t(y1) * lw + x0) * 4 + c] + src[(size_t(y1) * lw + x1) * 4 + c];
+-                    dst[(size_t(y) * nw + x) * 4 + c] = uint8_t((sum + 2) / 4);
+-                }
+-            }
+-        L->levels.push_back(std::move(dst));
+-        lw = nw;
+-        lh = nh;
++        L->levels.push_back(nextRgbaLevel(L->levels.back(), lw, lh));
++        lw = std::max(1, lw / 2);
++        lh = std::max(1, lh / 2);
+     }
+ }
+ 
+@@ -783,18 +788,20 @@ static void loadCachedLevels(const std::string& name, const PackFile& f, Loaded*
+     for (auto& lv : levels) L->levels.push_back(std::move(lv));
+ }
+ 
+-// Keeps the levels a completion made (L->levels from L->first on).
+-static void storeCachedLevels(const std::string& name, const PackFile& f, const Loaded& L) {
++// Keeps the levels a completion made (L->levels from L->first on); with
++// ".top", a shrunk replacement's top level (shrinkToLimit).
++static const char kTopMagic[8] = {'S', 'M', 'S', 'T', 'O', 'P', '0', '1'};
++static void storeCachedLevels(const std::string& name, const PackFile& f, const Loaded& L, const char* ext = ".mips") {
+     const std::string& dir = mipCacheDir();
+     MipsHeader hd{};
+     if (dir.empty() || L.levels.empty() || !sourceStamp(f.path, &hd.size, &hd.mtime)) return;
+-    memcpy(hd.magic, kMipsMagic, 8);
++    memcpy(hd.magic, strcmp(ext, ".top") ? kMipsMagic : kTopMagic, 8);
+     hd.w = uint32_t(L.w);
+     hd.h = uint32_t(L.h);
+     hd.blocks = uint32_t(L.blocks);
+     hd.first = uint32_t(L.first);
+     hd.count = uint32_t(L.levels.size());
+-    const std::string path = dir + "/" + name + ".mips", part = path + ".part";
++    const std::string path = dir + "/" + name + ext, part = path + ".part";
+     FILE* out = fopen(part.c_str(), "wb");
+     if (!out) return;
+     bool ok = fwrite(&hd, sizeof hd, 1, out) == 1;
+@@ -822,6 +829,85 @@ static void storeCachedLevels(const std::string& name, const PackFile& f, const
+     if (!ok || ec) std::filesystem::remove(part, ec);
+ }
+ 
++// ------------------------------------------------------------------ replacements too large to hold
++// SMS_TEXTURE_PACK_MAX_SIZE=n halves a replacement longer than n pixels until
++// it is not, for a GPU that cannot hold a pack's largest images (the PS5's
++// driver: the UHD pack's 4096 to 16384 pixel files ran it out of memory, and
++// took 17 seconds to send in one load). The file's own lower levels serve
++// where it has them; otherwise the top level is made from the largest, by
++// nextBlockLevel, and kept on disk as <name>.top beside the completed levels,
++// so each large file is read once. Unset or 0 keeps every replacement whole.
++static int maxSize() {
++    static const int n = getenv("SMS_TEXTURE_PACK_MAX_SIZE") ? std::max(0, atoi(getenv("SMS_TEXTURE_PACK_MAX_SIZE"))) : 0;
++    return n;
++}
++
++static int halvings(int w, int h) {
++    int k = 0;
++    while (maxSize() > 0 && std::max(w, h) > maxSize()) {
++        w = std::max(1, w / 2);
++        h = std::max(1, h / 2);
++        k++;
++    }
++    return k;
++}
++
++static bool ddsSize(const std::string& path, int* w, int* h) {
++    uint8_t d[20];
++    FILE* f = fopen(path.c_str(), "rb");
++    if (!f) return false;
++    bool ok = fread(d, sizeof d, 1, f) == 1 && !memcmp(d, "DDS ", 4);
++    fclose(f);
++    if (!ok) return false;
++    *h = int(rd32(d + 12));
++    *w = int(rd32(d + 16));
++    return *w > 0 && *h > 0;
++}
++
++// The top level an earlier shrinkToLimit kept, for a file of w x h halved k times.
++static bool loadShrunk(const std::string& name, const PackFile& f, int w, int h, int k, Loaded* L) {
++    const std::string& dir = mipCacheDir();
++    uint64_t size;
++    int64_t mtime;
++    if (dir.empty() || !sourceStamp(f.path, &size, &mtime)) return false;
++    FILE* in = fopen((dir + "/" + name + ".top").c_str(), "rb");
++    if (!in) return false;
++    MipsHeader hd;
++    std::vector<uint8_t> top;
++    const int sw = std::max(1, w >> k), sh = std::max(1, h >> k);
++    if (fread(&hd, sizeof hd, 1, in) == 1 && !memcmp(hd.magic, kTopMagic, 8) && hd.size == size && hd.mtime == mtime &&
++        hd.w == uint32_t(sw) && hd.h == uint32_t(sh) && hd.first == 0 && hd.count == 1 && gpuTakes(int(hd.blocks))) {
++        top.resize(blockLevelBytes(int(hd.blocks), sw, sh));
++        if (fread(top.data(), top.size(), 1, in) != 1) top.clear();
++    }
++    fclose(in);
++    if (top.empty()) return false;
++    L->w = sw;
++    L->h = sh;
++    L->blocks = int(hd.blocks);
++    L->compressed = kGl[L->blocks];
++    L->levels.push_back(std::move(top));
++    return true;
++}
++
++// Halves L k times, from the deepest of the levels it has that is still too
++// large. True if that made a level (rather than only dropping the file's own).
++static bool shrinkToLimit(Loaded* L, int k) {
++    const int drop = std::min(k, int(L->levels.size()) - 1);
++    L->levels.erase(L->levels.begin(), L->levels.begin() + drop);
++    L->w = std::max(1, L->w >> drop);
++    L->h = std::max(1, L->h >> drop);
++    for (int i = drop; i < k; i++) {
++        std::vector<uint8_t> next = L->compressed ? nextBlockLevel(L->blocks, L->levels[0], L->w, L->h, false)
++                                                  : nextRgbaLevel(L->levels[0], L->w, L->h);
++        L->levels.clear();
++        L->levels.push_back(std::move(next));
++        L->w = std::max(1, L->w / 2);
++        L->h = std::max(1, L->h / 2);
++    }
++    return drop < k;
++}
++
+ // `whole`: also the compressed levels completeChain makes, else only the
+ // pack's and the cached ones (RGBA images are always completed: they are
+ // decoded anyway).
+@@ -830,6 +916,13 @@ static Loaded* decode(const std::string& name, bool whole, bool cached = true) {
+     Loaded* L = new Loaded;
+     L->arbitrary = f.arbitrary;
+     if (endsWith(f.path, ".dds") || endsWith(f.path, ".DDS")) {
++        int fw = 0, fh = 0;
++        const int k = maxSize() > 0 && ddsSize(f.path, &fw, &fh) ? halvings(fw, fh) : 0;
++        if (k && loadShrunk(name, f, fw, fh, k, L)) {
++            if (cached) loadCachedLevels(name, f, L);
++            if (whole) completeChain(L);
++            return L;
++        }
+         if (!decodeDds(f.path, L)) {
+             logmsg("texture pack: cannot read %s (not a DDS of a supported format)", f.path.c_str());
+             L->failed = true;
+@@ -847,6 +940,10 @@ static Loaded* decode(const std::string& name, bool whole, bool cached = true) {
+                 L->levels.push_back(std::move(mip.levels.front()));
+             }
+         }
++        if (k && !L->failed && shrinkToLimit(L, k)) {
++            logmsg("texture pack: %s is %dx%d, used at %dx%d", f.path.c_str(), fw, fh, L->w, L->h);
++            if (L->compressed) storeCachedLevels(name, f, *L, ".top");
++        }
+         if (cached && !L->failed && L->compressed) loadCachedLevels(name, f, L);
+         if (whole || !L->compressed) completeChain(L);
+         return L;
+@@ -1049,6 +1146,9 @@ static bool beginUpload(Upload& u) {
  // Sends u's levels, at least one piece and then while `sent` is under
  // `allowance`; true once they are all in. A completion's levels already have
  // their storage (finishUpload), so they only fill it.
@@ -719,7 +924,7 @@ index bcd4174..3887f46 100644
  static bool sendLevels(Upload& u, int unit, size_t allowance, size_t* sent) {
      Loaded* L = u.item.image.get();
      const bool fill = u.item.request.kind == REST;
-@@ -1062,7 +1065,7 @@ static bool sendLevels(Upload& u, int unit, size_t allowance, size_t* sent) {
+@@ -1062,7 +1162,7 @@ static bool sendLevels(Upload& u, int unit, size_t allowance, size_t* sent) {
          const int n = L->first + int(u.level);
          const int lw = std::max(1, L->w >> n), lh = std::max(1, L->h >> n);
          size_t bytes = lv.size();
@@ -728,7 +933,7 @@ index bcd4174..3887f46 100644
              if (L->compressed)
                  glCompressedTexImage2D(GL_TEXTURE_2D, n, L->compressed, lw, lh, 0, GLsizei(bytes), lv.data());
              else
-@@ -1212,13 +1215,23 @@ static bool takeDecoded(Upload& u, bool pack) {  // with s_mu held
+@@ -1212,13 +1312,23 @@ static bool takeDecoded(Upload& u, bool pack) {  // with s_mu held
  // Sends decoded textures into GL: all of the ones resources asked for when
  // `wait` (a load: until none is left to decode), else up to a frame's
  // allowance, or 2 ms. The whole pack's wait for loads (uploadPack).
@@ -752,7 +957,7 @@ index bcd4174..3887f46 100644
          if (s_uploads.empty()) {
              Upload u;
              {
-@@ -1226,10 +1239,14 @@ static void uploadPending(bool wait) {
+@@ -1226,10 +1336,14 @@ static void uploadPending(bool wait) {
                  if (wait) lk.lock();
                  else if (!lk.try_lock()) break;
                  auto loaded = [] { return s_decodedDemand == 0 && s_queue.empty() && !s_busy; };
@@ -767,7 +972,7 @@ index bcd4174..3887f46 100644
              continue;
          }
          Upload& u = s_uploads.front();
-@@ -1237,11 +1254,14 @@ static void uploadPending(bool wait) {
+@@ -1237,11 +1351,14 @@ static void uploadPending(bool wait) {
              s_uploads.pop_front();
              continue;
          }
@@ -783,7 +988,7 @@ index bcd4174..3887f46 100644
          if (!wait && (sent >= allowance || Clock::now() - start >= std::chrono::milliseconds(2))) break;
      }
  }
-@@ -1325,20 +1345,32 @@ static void touchFresh() {
+@@ -1325,20 +1442,32 @@ static void touchFresh() {
      glcInvalidate();
  }
  

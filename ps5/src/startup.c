@@ -149,6 +149,10 @@ ps5_startup(void)
       PC's budget of 1536 cannot fit: the title died at about 1,070. From 512
       the oldest are let go, which keeps about 3 GiB spare through a load. */
    set("SMS_TEXTURE_PACK_MB", "512", 0);
+   /* ... and the largest images it can take: the UHD pack's 4096 to 16384
+      pixel files are halved to 2048 (or less) the first time each is used, and
+      kept so in userdata/.cache, so the pack goes in as its authors publish it */
+   set("SMS_TEXTURE_PACK_MAX_SIZE", "3072", 0);
    if (stat("/app0/mods/hd-cutscenes", &status) == 0)
       set("SMS_HD_CUTSCENES", "/app0/mods/hd-cutscenes", 0);
    find_disc();

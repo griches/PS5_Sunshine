@@ -6,7 +6,7 @@
 #   ps5/tools/vm.sh console-files        ps5/tools/console-files.sh (your sm64.o2r, over FTP)
 #   ps5/tools/vm.sh deploy               ps5/tools/deploy.sh (FTP to the console)
 #   ps5/tools/vm.sh run                  ps5/tools/run.sh (launch and follow klog)
-#   ps5/tools/vm.sh package-kit [V]      ps5/tools/package-kit.sh (the builder kit)
+#   ps5/tools/vm.sh package-release [V]  ps5/tools/package-release.sh (the release archive)
 #
 # The stack (PS5_Vulkan with its RADV archive, PS5_Mesa, PS5_PayloadSDK) lives in
 # the Lima VM "ps5" under ~/ps5, built with LLVM 22 (~/ps5/env.sh); this folder is

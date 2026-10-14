@@ -24,14 +24,15 @@ drawn with OpenGL through the [PS5 OpenGL SDK](https://github.com/blackbearreloa
 (Mesa over the console's own GPU interface).
 
 It needs a PS5 that already runs homebrew, and **your own disc image of the
-game** (North America, `GMSE01`). No game code, game data, Nintendo artwork,
-Sony software or keys are included here.
+game** (North America, `GMSE01`): the title is compiled from the
+decompilation and reads everything else (models, levels, sound, movies) from
+your disc. No game data, Nintendo artwork, Sony software or keys are included.
 
 This is an unofficial port. It is not part of sms-pc-port and is not supported
 by it: **please do not take PS5 problems to chasem-dev.** Report them
 [here](https://github.com/griches/PS5_Sunshine/issues).
 
-## This is an early release: 0.9.0
+## This is an early release: 0.10.0
 
 **It is not fully tested.** It was brought up and played on one console over a
 single day (2026-10-13), through the opening, Delfino Plaza and the first
@@ -39,33 +40,114 @@ episode of Bianco Hills. Everything after that is unplayed on a PS5. Expect
 faults; several serious ones were found and fixed only by playing, and there
 will be more further into the game. Keep a copy of your save.
 
-New in 0.9.0: sms-pc-port's save states (L1 + R1) and its faster wipe into the
-map, from its revision of 2026-10-14, and a builder kit that no longer needs
-Docker.
+New in 0.10.0: a ready-made title instead of a builder kit (nothing to build:
+copy it over and add your disc), and the HD texture pack goes in as its
+authors publish it, with the console sizing its largest images itself.
 
-## How to get it: the builder kit
+## Installing
 
-A built title holds the game's own code, so none is offered here. The
-[release](https://github.com/griches/PS5_Sunshine/releases/latest) is a
-**builder kit**: everything of a build except that code. On your own computer
-it downloads the public source code, compiles it and links the title. One
-command, about 5 to 20 minutes, on a Mac with Apple silicon, on Linux, or on
-Windows in WSL. No Docker: on Ubuntu and WSL the compiler, LLVM 22, comes from
-LLVM's own packages (apt.llvm.org); on a Mac it and the build tools are fetched
-from their own releases the first time, checked, and kept for next time.
+You need a PS5 that runs homebrew, with etaHEN (or an equivalent),
+ShadowMountPlus (which shows folders in `/data/homebrew` as games) and an FTP
+server, and **your own disc image** of the North American release (`GMSE01`,
+revision 0) as `.iso`, `.gcm` or Dolphin's `.ciso`. Other regions are not
+supported.
 
-1. Download `sunshine-ps5-kit-<version>.zip` from the
+1. Download `Sunshine-PS5-v<version>.zip` from the
    [releases page](https://github.com/griches/PS5_Sunshine/releases/latest) and unzip it.
-2. Get your computer ready once (a Mac: Apple's Command Line Tools; Windows: WSL
-   and LLVM 22; the kit's README has the commands), then open a terminal in the
-   kit's folder and run `./make-title.sh`.
-3. Copy the folder it makes, `out/PPSA99312`, to `/data/homebrew/` on the console (FTP).
-4. Copy your own disc image (`.iso`, `.gcm` or `.ciso`) into that folder, beside `eboot.bin`.
+2. With an FTP program (FileZilla, Cyberduck, WinSCP), copy the **whole
+   `PPSA99312` folder** into `/data/homebrew/` on the console.
+3. Copy your disc image into that folder, beside `eboot.bin`:
 
-The kit's own [README](ps5/kit/README.md) has every step, the controls, the
-settings menu, the steps for Windows and what to do when something goes wrong.
+```text
+/data/homebrew/PPSA99312/eboot.bin
+/data/homebrew/PPSA99312/sce_sys/
+/data/homebrew/PPSA99312/sce_module/
+/data/homebrew/PPSA99312/res/
+/data/homebrew/PPSA99312/licenses/
+/data/homebrew/PPSA99312/GMSE01.iso        (your disc image; any name)
+```
 
-**Never share the folder the kit makes, or its `eboot.bin`.**
+"Super Mario Sunshine" appears on the home screen. If it does not, check the
+folder is exactly `/data/homebrew/PPSA99312/` with `eboot.bin` directly inside
+it (not `PPSA99312/PPSA99312/`), and that ShadowMountPlus is running. If it
+starts and closes at once, the disc image is missing or is not the North
+American one.
+
+To update, copy the new release's `PPSA99312` folder over the old one. Your
+saves, settings, disc image and texture packs are left alone.
+
+## Playing
+
+| DualSense | In the game |
+| --- | --- |
+| Cross | A (jump, confirm) |
+| Circle | B (dive, back) |
+| Square | X |
+| Triangle | Y (first-person view) |
+| R1 | Z |
+| L1 + R1 | **Save state** (in a level); in the pause menu, the list of save states to load |
+| L2, R2 | L, R (R sprays FLUDD) |
+| Options | Start (pause, map) |
+| Touch pad button | **Settings** |
+| Sticks, D-pad | as on a GameCube |
+
+The prompts the game shows on screen are the DualSense's own.
+
+**Settings.** Press the touch pad's button at any time. The D-pad moves and
+changes, Cross steps through a row's choices, Circle or the touch pad closes it.
+
+| Row | What it does |
+| --- | --- |
+| Invert FLUDD Aim X / Y | flips the left stick while you aim FLUDD |
+| Invert Camera X / Y | flips the right stick's camera |
+| Camera Shake | OFF, HALF or FULL: the game's earthquakes (off to begin with) |
+| Performance Overlay | OFF, MINIMAL (the frame rate alone) or FULL |
+| Heat Haze | the heat shimmer |
+| Resolution \* | 960p, 1440p, 1920p or 2160p |
+| Frame Rate \* | 30 or 60 |
+| Picture \* | 4:3 or 16:9 |
+| Smoothing (FXAA) \* | on or off |
+
+Rows marked \* take effect the next time you start the game. Below them are
+the PC port's cheats (god mode, infinite lives and so on). Saves and settings
+are kept in `/data/homebrew/PPSA99312/userdata/`.
+
+**Save states.** Hold L1 and press R1 in a level to save the moment. Pause
+(Options) and press L1 + R1 again to see your save states, with a picture of
+each, and load one. They are kept in `userdata/savestates`. A state loads
+exactly only in the build that saved it; with a newer release, older states put
+Mario back where he was in that level and keep your progress, but the level
+starts afresh.
+
+## HD textures (optional)
+
+The port loads texture packs made for the Dolphin emulator. The one it was
+tested with is the
+[Super Mario Sunshine UHD Texture Pack](https://github.com/qashto/Super_Mario_Sunshine_UHD_Texture_Pack)
+(by qashto and razius), with chasem-dev's
+[HD texture extras](https://github.com/chasem-dev/sms-hd-texture-extras):
+
+1. Download `GMS.7z` from the UHD pack's
+   [release 2.1.1](https://github.com/qashto/Super_Mario_Sunshine_UHD_Texture_Pack/releases/tag/2.1.1)
+   and `sms-hd-texture-extras-1.1.1.zip` from the extras'
+   [release 1.1.1](https://github.com/chasem-dev/sms-hd-texture-extras/releases/tag/v1.1.1).
+2. Unpack both on your computer (7-Zip on Windows; a Mac opens the `.7z` with
+   The Unarchiver or `tar -xf GMS.7z`).
+3. Copy them to the console so that you have:
+
+```text
+/data/homebrew/PPSA99312/mods/textures/GMS/                     (the GMS folder from GMS.7z's Textures folder)
+/data/homebrew/PPSA99312/mods/textures/sms-hd-texture-extras/   (the extras' zip, unpacked)
+```
+
+The packs are not part of this project and are not stored by it: they belong
+to their authors.
+
+**The first visit to each area is slower.** The UHD pack's largest images
+(4096 to 16384 pixels) are more than the console's graphics driver can hold,
+so the title halves each one to 2048 pixels or less the first time it is used
+and keeps the result in `userdata/.cache`. After that, loads read the small
+copy. Deleting that folder only means the work is done again.
 
 ## Status
 
@@ -79,25 +161,20 @@ read in the title's log. Nothing else is claimed.
 | Start-up | The logos, the opening movie, the title screen, file select; a saved file loaded | A new game from an empty memory card |
 | Rendering | 3840x2160; Delfino Plaza and Bianco Hills episode 1 look right; the plaza's gates show their movie of the level beyond | Everything past Bianco Hills episode 1; a comparison with a GameCube |
 | Frame rate | A locked 60 frames a second (16.7 ms) in the plaza and Bianco Hills, at 2160p, with the HD texture pack | Later, heavier areas; a long session |
-| Loading | Delfino Plaza in about 5 seconds with the console-sized HD pack; a "LOADING..." notice during long loads | |
+| Loading | Delfino Plaza in about 6 seconds with the HD pack (9 the first time, while its largest images are halved); a "LOADING..." notice during long loads | |
 | Input | Walking, jumping, the camera, FLUDD, menus, the DualSense's own button prompts | Every button in play; rumble; a second controller |
 | Settings | The touch pad's menu: inverted FLUDD aim and camera, camera shake, the performance overlay, resolution, frame rate; choices kept across a restart | Every row; the cheats below them |
 | Saving | A save made earlier loads | Saving in play, checked after a restart |
 | Save states | Saving with L1 + R1 in a level, the pause menu's list with pictures, loading a state, and loading after a restart | States across many levels; a state from another build (loads the position only, by design) |
 | The map (R1) | The wipe into it, now quick | |
 | Sound | Music, effects and the movies' sound play | A careful listen for faults |
-| Texture packs | The UHD pack and the HD extras, sized for the console (see below) | Other packs |
-| Memory | Two levels and back without running out, with the console-sized pack | Many levels in one session |
-| Builder kit | Built without Docker on a Mac (Apple silicon, macOS's own tools) and on Linux (arm64), and the Mac's title played on the console. On x86-64 Linux: LLVM's build fetched and run, a game file compiled identically, `eboot.bin` made byte for byte the same | A whole build on Windows (WSL) or x86-64 Linux; the `--docker` route |
+| Texture packs | The UHD pack and the HD extras as published, their largest images halved on the console (see below) | Other packs |
+| Memory | Two levels and back without running out, with the pack sized for the console on a PC (the same sizes the console now makes itself) | Bianco Hills with the console's own halving; many levels in one session |
 
 ### Known problems
 
 - **Only the start of the game has been played.** Anything from Bianco Hills
   episode 2 onward is untested on a PS5.
-- **Large texture packs must be shrunk.** The console's driver needs about ten
-  times a texture's size in memory. The UHD pack as published made loads take
-  17 seconds and ran the console out of memory in the second level. The kit
-  makes a console-sized copy for you.
 - **Camera shake is off to begin with.** The game's earthquakes (a boss
   landing, a building rising) are strong on a large screen. Turn them back on
   in the settings menu if you want the original feel.
@@ -149,11 +226,11 @@ tools; no Vulkan driver is linked) and the PS5 OpenGL SDK 1.0.2.
 ```sh
 git clone https://github.com/griches/PS5_Sunshine.git && cd PS5_Sunshine
 git clone https://github.com/chasem-dev/sms-pc-port.git vendor/sms-pc-port
-git -C vendor/sms-pc-port checkout c8fb4a3e81a2176588574395302ecf862f9a440a   # see ps5/kit: REVISIONS
+git -C vendor/sms-pc-port checkout c8fb4a3e81a2176588574395302ecf862f9a440a   # the revision SOURCE.txt names
 git -C vendor/sms-pc-port submodule update --init decomp
 export PS5_VULKAN_DIR=/path/to/PS5_Vulkan PS5_OPENGL_PREFIX=/path/to/ps5-opengl-sdk/sdk
-ps5/tools/build.sh           # applies the patch, builds dist/PPSA99312/
-ps5/tools/package-kit.sh     # the builder kit, dist/kit/
+ps5/tools/build.sh             # applies the patch, builds dist/PPSA99312/
+ps5/tools/package-release.sh   # the release archive, dist/Sunshine-PS5-v<version>.zip
 ```
 
 `ps5/tools/setup-source.sh --save` writes changes made under
