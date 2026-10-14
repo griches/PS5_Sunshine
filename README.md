@@ -40,9 +40,9 @@ episode of Bianco Hills. Everything after that is unplayed on a PS5. Expect
 faults; several serious ones were found and fixed only by playing, and there
 will be more further into the game. Keep a copy of your save.
 
-New in 0.10.0: a ready-made title instead of a builder kit (nothing to build:
-copy it over and add your disc), and the HD texture pack goes in as its
-authors publish it, with the console sizing its largest images itself.
+New in 0.10.0: a ready-made title (copy it over and add your disc), and the HD
+texture pack goes in as its authors publish it, with the console sizing its
+largest images itself.
 
 ## Installing
 
@@ -115,7 +115,7 @@ are kept in `/data/homebrew/PPSA99312/userdata/`.
 **Save states.** Hold L1 and press R1 in a level to save the moment. Pause
 (Options) and press L1 + R1 again to see your save states, with a picture of
 each, and load one. They are kept in `userdata/savestates`. A state loads
-exactly only in the build that saved it; with a newer release, older states put
+exactly only in the release that saved it; with a newer release, older states put
 Mario back where he was in that level and keep your progress, but the level
 starts afresh.
 
@@ -169,7 +169,7 @@ read in the title's log. Nothing else is claimed.
 | The map (R1) | The wipe into it, now quick | |
 | Sound | Music, effects and the movies' sound play | A careful listen for faults |
 | Texture packs | The UHD pack and the HD extras as published, their largest images halved on the console (see below) | Other packs |
-| Memory | Two levels and back without running out, with the pack sized for the console on a PC (the same sizes the console now makes itself) | Bianco Hills with the console's own halving; many levels in one session |
+| Memory | Two levels and back without running out, with the HD pack at the sizes the console uses | Bianco Hills since the console does the halving itself; many levels in one session |
 
 ### Known problems
 
@@ -178,9 +178,9 @@ read in the title's log. Nothing else is claimed.
 - **Camera shake is off to begin with.** The game's earthquakes (a boss
   landing, a building rising) are strong on a large screen. Turn them back on
   in the settings menu if you want the original feel.
-- **Save states belong to the build that saved them.** L1 + R1 saves one in a
+- **Save states belong to the release that saved them.** L1 + R1 saves one in a
   level, and loads one from the pause menu (sms-pc-port's own). A state loads
-  exactly only in the build that saved it: after a rebuild it puts Mario back
+  exactly only in the release that saved it: in a newer one it puts Mario back
   where he was and keeps the progress, but the level starts afresh. Keep a
   copy of your memory card save as well.
 

@@ -12,7 +12,7 @@
 # console's own GPU interface, EGL for the screen), a static archive group and
 # its two import stubs. The title folder, dist/<TITLE_ID>/, gets the signed
 # eboot.bin, sce_sys/ and the licences. OBJECT may be an archive.
-# PS5_DIST_DIR is where the title folder goes instead of dist/ (the builder kit).
+# PS5_DIST_DIR is where the title folder goes instead of dist/.
 # PS5_OPENGL_PREFIX is the OpenGL SDK's sdk/ directory.
 #
 # Copyright (C) 2026 Mihawk
@@ -180,7 +180,7 @@ cp "$param" "$app/sce_sys/param.json"
 for asset in icon0.png pic0.dds pic1.dds snd0.at9; do
     [[ -f $ps5/sce_sys/$asset ]] && cp "$ps5/sce_sys/$asset" "$app/sce_sys/$asset"
 done
-# (Python, not sha256sum: the builder kit runs this on a Mac too)
+# (Python, not sha256sum, which a Mac does not have)
 python3 - "$vulkan/runtime/libc.prx" "$vulkan/runtime/libc.prx.sha256" <<'CHECK'
 import hashlib, sys
 want = open(sys.argv[2]).read().split()[0]
