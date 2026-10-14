@@ -27,7 +27,16 @@ project, under that project's licence.
 | Windowing, input and sound | [SDL2](https://github.com/libsdl-org/SDL) | Zlib |
 | The link recipe, the C runtime start-up and the fake-SELF tool | [PS5_Vulkan](https://github.com/mihawk-99/PS5_Vulkan) | GPL-3.0 |
 | The platform layer and SDK | [PS5_PayloadSDK](https://github.com/mihawk-99/PS5_PayloadSDK), a fork of ps5-payload-dev/sdk | GPL-3.0 |
-| Smaller libraries | stb, bcdec, xxHash | each its own, all permissive |
+| Smaller libraries | stb, bcdec, xxHash; zlib, in the kit's Linux build of the `eboot.bin` tool | each its own, all permissive |
+
+The builder kit fetches its compiler and build tools the first time it runs,
+from their projects' own releases: [LLVM](https://github.com/llvm/llvm-project)
+(Apache-2.0 with LLVM exceptions), [CMake](https://github.com/Kitware/CMake)
+(BSD-3-Clause) and [Ninja](https://github.com/ninja-build/ninja) (Apache-2.0),
+and for the optional texture pack [Pillow](https://github.com/python-pillow/Pillow)
+(MIT-CMU), [etcpak](https://github.com/K0lb3/etcpak) (MIT and BSD-3-Clause),
+[archspec](https://github.com/archspec/archspec) (Apache-2.0 or MIT) and, on
+Linux, [7-Zip](https://github.com/ip7z/7zip) (LGPL-2.1, with its unRAR restriction). None is in the kit.
 
 ## A built title is not for distribution
 

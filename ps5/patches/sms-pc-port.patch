@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 2ad719a..8a74c1b 100644
+index 091476d..3fcb2a8 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -90,6 +90,18 @@ include(${CMAKE_BINARY_DIR}/decomp_sources.cmake)
@@ -21,17 +21,17 @@ index 2ad719a..8a74c1b 100644
  set(SMS_GAME_FLAGS
    -w -fno-strict-aliasing -fwrapv -fno-omit-frame-pointer
    # Retail MSL has no _FORTIFY_SOURCE checks (Ubuntu g++ enables them at -O1+;
-@@ -118,7 +130,8 @@ check_cxx_compiler_flag("-fno-unreachable-traps" SMS_HAVE_NO_UNREACHABLE_TRAPS)
- if(SMS_HAVE_NO_UNREACHABLE_TRAPS)
-   list(APPEND SMS_GAME_FLAGS -fno-unreachable-traps)
- endif()
--if(SMS_ARCH STREQUAL "64")
+@@ -121,7 +133,8 @@ endif()
+ # Non-PIE: the game's code and data sit at the same addresses every run, which
+ # 64-bit builds need for pointers in u32 slots and save states need everywhere
+ # (a state holds pointers to the game's vtables and globals).
+-if(SMS_ARCH STREQUAL "64" OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
 +# (The PS5 only runs position-independent code; its titles load at 0x400000.)
-+if(SMS_ARCH STREQUAL "64" AND NOT PS5)
++if((SMS_ARCH STREQUAL "64" OR CMAKE_SYSTEM_NAME STREQUAL "Linux") AND NOT PS5)
    list(APPEND SMS_GAME_FLAGS -fno-pie)
  endif()
  # Clang rejects the game's pointer-to-int truncations ((int)ptr, (u32)ptr) as
-@@ -128,6 +141,13 @@ endif()
+@@ -131,6 +144,13 @@ endif()
  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
    list(APPEND SMS_GAME_FLAGS -fms-extensions)
  endif()
@@ -45,7 +45,7 @@ index 2ad719a..8a74c1b 100644
  
  # macOS: native arm64 reserves the low 4 GiB as PAGEZERO, so port_low_alloc
  # cannot satisfy pointer-in-u32. Build x86_64 (Rosetta) with a 4 KiB pagezero.
-@@ -294,6 +314,10 @@ elseif(WIN32)
+@@ -300,6 +320,10 @@ elseif(WIN32)
      set(_object_prefix "")
    endif()
    set(SMS_OBJCOPY objcopy)
@@ -56,7 +56,7 @@ index 2ad719a..8a74c1b 100644
  else()
    set(_object_prefix "")
    set(SMS_OBJCOPY objcopy)
-@@ -315,7 +339,7 @@ list(FILTER SMS_PLATFORM_SOURCES EXCLUDE REGEX "/platform/gx/")
+@@ -321,7 +345,7 @@ list(FILTER SMS_PLATFORM_SOURCES EXCLUDE REGEX "/platform/gx/")
  # platform/mods/eclipse is built by cmake/eclipse.cmake, and only with SMS_ECLIPSE.
  list(FILTER SMS_PLATFORM_SOURCES EXCLUDE REGEX "/platform/mods/eclipse/")
  list(FILTER SMS_PLATFORM_SOURCES EXCLUDE REGEX "/tests/")
@@ -65,7 +65,7 @@ index 2ad719a..8a74c1b 100644
    list(FILTER SMS_PLATFORM_SOURCES EXCLUDE REGEX "/platform/trace/trace\\.cpp$")
  endif()
  add_executable(sms ${SMS_PORT_SRC}/port_main.cpp ${SMS_PLATFORM_SOURCES})
-@@ -366,13 +390,14 @@ if(WIN32)
+@@ -373,13 +397,14 @@ if(WIN32)
      # data. Keep the image below 4 GiB, as on the Linux non-PIE build.
      target_link_options(sms PRIVATE -Wl,--image-base,0x400000 -Wl,--disable-dynamicbase -Wl,--disable-high-entropy-va)
    endif()
@@ -77,11 +77,39 @@ index 2ad719a..8a74c1b 100644
  else()
    target_link_options(sms PRIVATE -Wl,--defsym=lbl_80004600=0x80004600)
  endif()
--if(SMS_ARCH STREQUAL "64")
-+if(SMS_ARCH STREQUAL "64" AND NOT PS5)
+-if(SMS_ARCH STREQUAL "64" OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
++if((SMS_ARCH STREQUAL "64" OR CMAKE_SYSTEM_NAME STREQUAL "Linux") AND NOT PS5)
    target_compile_options(sms PRIVATE -fno-pie)
    if(NOT APPLE AND NOT WIN32)
      target_link_options(sms PRIVATE -no-pie)
+@@ -398,16 +423,21 @@ if(APPLE)
+ endif()
+ # Save states copy the game's own global variables: the link map says where
+ # they are, and tools/savestate_ranges.py writes that into the executable.
+-if(APPLE)
++# (The PS5's link makes its title from the executable in the link itself, so
++# the console's link script does this there.)
++if(PS5)
++elseif(APPLE)
+   target_link_options(sms PRIVATE "LINKER:-map,${CMAKE_BINARY_DIR}/sms.map")
+ else()
+   target_link_options(sms PRIVATE "LINKER:-Map=${CMAKE_BINARY_DIR}/sms.map")
+ endif()
+-add_custom_command(TARGET sms POST_BUILD
+-  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/savestate_ranges.py
+-    --map ${CMAKE_BINARY_DIR}/sms.map --exe $<TARGET_FILE:sms>
+-    --archive libsms_game.a --archive libsms_eclipse.a
+-  COMMENT "Recording the game's data for save states")
++if(NOT PS5)
++  add_custom_command(TARGET sms POST_BUILD
++    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/savestate_ranges.py
++      --map ${CMAKE_BINARY_DIR}/sms.map --exe $<TARGET_FILE:sms>
++      --archive libsms_game.a --archive libsms_eclipse.a
++    COMMENT "Recording the game's data for save states")
++endif()
+ find_package(Threads REQUIRED)
+ if(WIN32 AND SMS_ARCH STREQUAL "64")
+   add_executable(sms_windows_stack_test EXCLUDE_FROM_ALL
 diff --git a/decomp-patches/modhook-zz-macos-data-exports.patch b/decomp-patches/modhook-zz-macos-data-exports.patch
 index 6bb5f59..bdd84c6 100644
 --- a/decomp-patches/modhook-zz-macos-data-exports.patch
@@ -339,7 +367,7 @@ index c85815a..956cdf3 100644
  	// a headless run, so the process would ignore them. (No effect if the GX
  	// layer initialised SDL first; the user's own setting wins.)
 diff --git a/platform/gx/CMakeLists.txt b/platform/gx/CMakeLists.txt
-index 50a25d1..d97dde6 100644
+index 3a31075..bf0b8eb 100644
 --- a/platform/gx/CMakeLists.txt
 +++ b/platform/gx/CMakeLists.txt
 @@ -55,8 +55,10 @@ target_include_directories(sms_gx
@@ -790,23 +818,24 @@ index bcd4174..3887f46 100644
  
  // Once a display frame: over the memory budget (SMS_TEXTURE_PACK_MB, 1536
 diff --git a/platform/gx/src/gx_internal.h b/platform/gx/src/gx_internal.h
-index 88b4c57..d204cf6 100644
+index 1b0c961..77410da 100644
 --- a/platform/gx/src/gx_internal.h
 +++ b/platform/gx/src/gx_internal.h
-@@ -284,7 +284,12 @@ void shaderPrepareStage(int stage);  // while a stage loads: its programs (the w
- // ---------------------------------------------------------------- overlay panels
- // Each slot keeps its own texture, so panels drawn in the same frame keep their
- // cached bitmaps. GXPC_DrawOverlay draws the debug overlay's slot.
--enum OverlaySlot { OVERLAY_DEBUG, OVERLAY_CHEAT_MENU, OVERLAY_WARP_MENU, OVERLAY_SLOTS };
-+enum OverlaySlot { OVERLAY_DEBUG, OVERLAY_CHEAT_MENU, OVERLAY_WARP_MENU, OVERLAY_LOADING, OVERLAY_SLOTS };
+@@ -290,8 +290,14 @@ enum OverlaySlot {
+     OVERLAY_WARP_MENU,
+     OVERLAY_STATE_MENU,
+     OVERLAY_STATE_TOAST,
++    OVERLAY_LOADING,
+     OVERLAY_SLOTS
+ };
 +// A black frame saying LOADING, shown from inside a long load (gx_platform.cpp);
 +// `step` animates its dots.
 +void loadingScreen(int step);
 +size_t hiresResidentBytes();  // the texture pack's replacements held, for the statistics
 +void drawLoadingFrame(int step, int winW, int winH);  // gx_render.cpp, on the GL thread
  void drawOverlayPanel(OverlaySlot slot, const uint8_t* rgba, int w, int h, int x, int y, int scale, int winW, int winH);
- // Panel bitmaps (gx_overlay.cpp): RGBA8, w x h, row 0 at the top. Text shares
- // one scratch buffer, so panels are rasterised on the GL thread only.
+ // SMS_WINDOW_SHOTS: the window as shown, menus included, at GX frame `frame` (GL thread, before the swap).
+ void captureWindow(uint32_t frame, int w, int h);
 diff --git a/platform/gx/src/gx_overlay.cpp b/platform/gx/src/gx_overlay.cpp
 index d4cb8da..add238b 100644
 --- a/platform/gx/src/gx_overlay.cpp
@@ -896,10 +925,10 @@ index d4cb8da..add238b 100644
      GXPC_DrawOverlay(upload, w, h, 8, 8, scale, winW, winH);
  }
 diff --git a/platform/gx/src/gx_platform.cpp b/platform/gx/src/gx_platform.cpp
-index 23778b5..e39c1f3 100644
+index f2c1fc4..baa3ab8 100644
 --- a/platform/gx/src/gx_platform.cpp
 +++ b/platform/gx/src/gx_platform.cpp
-@@ -37,6 +37,15 @@
+@@ -38,6 +38,15 @@
  #include <EGL/egl.h>
  #include <EGL/eglext.h>
  #endif
@@ -915,7 +944,7 @@ index 23778b5..e39c1f3 100644
  
  namespace gx {
  extern void (*g_displayCopyHook)(const void* xfb);
-@@ -598,10 +607,86 @@ void dumpFrame(const void* xfb) {
+@@ -599,10 +608,86 @@ void dumpFrame(const void* xfb) {
      fclose(f);
  }
  
@@ -1002,7 +1031,7 @@ index 23778b5..e39c1f3 100644
      const bool skip = s_skipPresent && s_presentCost >= kSkipPresentCost;
      s_skipPresent = false;
      s_lastPresent = 0;
-@@ -737,6 +822,27 @@ int GXPC_InitAuto(float efbScale) {
+@@ -738,6 +823,27 @@ int GXPC_InitAuto(float efbScale) {
      return 0;
  }
  
@@ -1030,7 +1059,7 @@ index 23778b5..e39c1f3 100644
  void GXPC_Present(const void* xfb) {
  #ifdef SMS_GX_HAVE_SDL2
      if (s_mode == MODE_WINDOW && s_window) {
-@@ -864,6 +970,25 @@ void sms_gx_pump_events(void) {
+@@ -867,6 +973,25 @@ void sms_gx_pump_events(void) {
              }
              continue;
          }
@@ -1057,7 +1086,7 @@ index 23778b5..e39c1f3 100644
          // the debug overlay is open, and closes it; a press that does either
          // is kept from the pad layer, release included. Otherwise they reach
 diff --git a/platform/gx/src/gx_render.cpp b/platform/gx/src/gx_render.cpp
-index dae542e..b985d17 100644
+index bd96a35..4e7c559 100644
 --- a/platform/gx/src/gx_render.cpp
 +++ b/platform/gx/src/gx_render.cpp
 @@ -14,9 +14,25 @@
@@ -1390,9 +1419,9 @@ index dae542e..b985d17 100644
      const GLsizeiptr bytes = GLsizeiptr(s_efbW) * EFB_H * 4;
      int cur = s_frameNo & 1, t = depth ? 1 : 0;
      if (!(s_peekIssued & (1u << t))) {
-@@ -2999,6 +3213,27 @@ void GXPC_DrawOverlay(const uint8_t* rgba, int w, int h, int x, int y, int scale
- 
- }  // extern "C"
+@@ -3030,6 +3244,27 @@ void gx::captureWindow(uint32_t frame, int w, int h) {
+     }
+ }
  
 +// The window black, with LOADING and its dots at the bottom right.
 +void gx::drawLoadingFrame(int step, int winW, int winH) {
@@ -1418,7 +1447,7 @@ index dae542e..b985d17 100644
  void gx::drawOverlayPanel(OverlaySlot slot, const uint8_t* rgba, int w, int h, int x, int y, int scale, int winW, int winH) {
      if (!s_ready || w <= 0 || h <= 0) return;
      if (!rgba && (!s_overlayTex[slot] || w != s_overlayW[slot] || h != s_overlayH[slot])) return;
-@@ -3093,7 +3328,7 @@ void main() { o_color = texture(u_color, v_uv); }
+@@ -3124,7 +3359,7 @@ void main() { o_color = texture(u_color, v_uv); }
      float window[2] = {float(winW), float(winH)};
      glUniform4fv(s_overlayRect, 1, rect);
      glUniform2fv(s_overlayWindow, 1, window);
@@ -1460,7 +1489,7 @@ index 56ff7cc..7d3826b 100644
  	// The kernel checks the source and fails with EFAULT instead of faulting.
  	struct iovec local = {to, size}, remote = {(void*)from, size};
 diff --git a/platform/os/os_thread.cpp b/platform/os/os_thread.cpp
-index e676983..335167f 100644
+index 193c3a7..a1f253d 100644
 --- a/platform/os/os_thread.cpp
 +++ b/platform/os/os_thread.cpp
 @@ -328,6 +328,19 @@ double mono_seconds()
@@ -1533,7 +1562,7 @@ index e676983..335167f 100644
  	Host* h = new Host();
  	pthread_cond_init(&h->cv, NULL);
  	h->irq_enabled = true;
-@@ -854,3 +901,37 @@ extern "C" void OSWaitCond(OSCond* c, OSMutex* m)
+@@ -871,3 +918,37 @@ extern "C" void OSWaitCond(OSCond* c, OSMutex* m)
  extern "C" void OSSignalCond(OSCond* c) { OSWakeupThread(&c->queue); }
  
  extern "C" double port_idle_seconds(void) { return g_idle_seconds; }
@@ -1572,10 +1601,10 @@ index e676983..335167f 100644
 +	OSRestoreInterrupts(lvl);
 +}
 diff --git a/platform/pad/pad.cpp b/platform/pad/pad.cpp
-index ecc299e..2a64638 100644
+index c05f07f..930473b 100644
 --- a/platform/pad/pad.cpp
 +++ b/platform/pad/pad.cpp
-@@ -68,7 +68,13 @@ __attribute__((weak)) int GXPC_GameInputBlocked(void);
+@@ -69,7 +69,13 @@ __attribute__((weak)) int GXPC_GameInputBlocked(void);
  //   SMS_CAMERA_SPEED=percent   scales manual camera rotation (100 = retail)
  //   SMS_FREE_CAMERA=1          the camera stays where it is put (no auto swing-back)
  //   SMS_MOUSE_SENSITIVITY=%    mouse look speed, when the GX layer captures the mouse
@@ -1589,7 +1618,7 @@ index ecc299e..2a64638 100644
  int port_free_camera      = 0;
  f32 port_camera_speed_x   = 1.0f;
  f32 port_camera_speed_y   = 1.0f;
-@@ -664,6 +670,12 @@ void init()
+@@ -739,6 +745,12 @@ void init()
  	parse_bindings(kDefaultBindings, "defaults");
  	g_invert_cx = env_on("SMS_CAMERA_INVERT_X");
  	g_invert_cy = env_on("SMS_CAMERA_INVERT_Y");
@@ -1602,7 +1631,7 @@ index ecc299e..2a64638 100644
  	if (g_invert_cx || g_invert_cy)
  		port_log("[pad] camera inverted:%s%s\n", g_invert_cx ? " X" : "", g_invert_cy ? " Y" : "");
  	const char* path = getenv("SMS_BINDINGS");
-@@ -736,8 +748,10 @@ void autopress_init()
+@@ -811,8 +823,10 @@ void autopress_init()
  		g_auto.push_back(a);
  	}
  	// Headless runs have no SDL event loop: set the key state directly.
@@ -1613,7 +1642,7 @@ index ecc299e..2a64638 100644
  	port_log("[pad] SMS_AUTOPRESS: %u scripted presses via %s\n", (unsigned)g_auto.size(),
  	         g_push ? "SDL_PushEvent (keyboard path)" : "direct key state");
  }
-@@ -909,6 +923,20 @@ extern "C" u32 PADRead(PADStatus* status)
+@@ -1045,6 +1059,20 @@ extern "C" u32 PADRead(PADStatus* status)
  	return PAD_CHAN0_BIT;
  }
  
@@ -1647,7 +1676,7 @@ index e3838ba..57faea6 100644
  int port_vi_deterministic(void);
  s64 port_vi_virtual_ticks(void);
 diff --git a/platform/port_runtime.cpp b/platform/port_runtime.cpp
-index e2ccfa4..30ad8c1 100644
+index cecfc98..1951eca 100644
 --- a/platform/port_runtime.cpp
 +++ b/platform/port_runtime.cpp
 @@ -73,6 +73,7 @@ int port_heat_haze = 1;
@@ -1750,6 +1779,80 @@ index e2ccfa4..30ad8c1 100644
  	if (p != MAP_FAILED)
  		return p;
  #endif
+diff --git a/platform/savestate/savestate.cpp b/platform/savestate/savestate.cpp
+index 33a62af..fa5c45c 100644
+--- a/platform/savestate/savestate.cpp
++++ b/platform/savestate/savestate.cpp
+@@ -6,7 +6,9 @@
+ // after linking, so tools/savestate_ranges.py reads the link map and writes
+ // them, with a fingerprint of the build, into kRanges below (it finds the
+ // placeholder in the executable by its magic). A build without that table
+-// saves and loads the portable part only.
++// saves and loads the portable part only. A position-independent build (the
++// PS5's) has the ranges at link addresses, and the table's own link address
++// beside them, so they slide by where the table was loaded.
+ //
+ // A state is saved and loaded between two frames (patch zzz-savestate-01), on
+ // the game's thread while it owns the CPU, with no disc read or interrupt
+@@ -60,10 +62,12 @@ extern "C" __attribute__((weak)) const void* port_button_glyph(int chr);
+ // Filled in after linking (tools/savestate_ranges.py; keep the layout in
+ // step): the build's fingerprint and the game's writable data as [start, end)
+ // address ranges. count 0: this build cannot save or load exactly.
++// linkAddress: where the linker put this table, for a position-independent
++// build (savestate_ranges.py --pie); 0, the ranges are where they are.
+ struct PortSaveStateRanges {
+ 	char magic[16];
+ 	uint8_t fingerprint[32];
+-	uint32_t count, reserved;
++	uint32_t count, linkAddress;
+ 	uint64_t ranges[2048][2];
+ };
+ __attribute__((used)) static const volatile PortSaveStateRanges kRanges = { "SMSSTATE-RANGES", {}, 0, 0, {} };
+@@ -120,11 +124,19 @@ uint32_t range_count()
+ 	return n <= sizeof kRanges.ranges / sizeof kRanges.ranges[0] ? n : 0;
+ }
+ 
++// Where range i is in this run.
++u8* range_start(uint32_t i)
++{
++	const uintptr_t slide = kRanges.linkAddress ? (uintptr_t)&kRanges - kRanges.linkAddress : 0;
++	return (u8*)(uintptr_t)(kRanges.ranges[i][0] + slide);
++}
++size_t range_size(uint32_t i) { return (size_t)(kRanges.ranges[i][1] - kRanges.ranges[i][0]); }
++
+ size_t globals_size()
+ {
+ 	size_t n = 0;
+ 	for (uint32_t i = 0; i < range_count(); i++)
+-		n += (size_t)(kRanges.ranges[i][1] - kRanges.ranges[i][0]);
++		n += range_size(i);
+ 	return n;
+ }
+ 
+@@ -575,9 +587,8 @@ int port_savestate_save(const PortSaveStatePortable* portable)
+ 			job->aram.assign(aram, aram + aramSize);
+ 		job->globals.reserve(info.globalsSize);
+ 		for (uint32_t i = 0; i < range_count(); i++) {
+-			const u8* a = (const u8*)(uintptr_t)kRanges.ranges[i][0];
+-			const u8* b = (const u8*)(uintptr_t)kRanges.ranges[i][1];
+-			job->globals.insert(job->globals.end(), a, b);
++			const u8* a = range_start(i);
++			job->globals.insert(job->globals.end(), a, a + range_size(i));
+ 		}
+ 	}
+ 	port_log("[savestate] saving %s (%s)\n", job->path.c_str(), exact ? "exact" : "position only");
+@@ -661,9 +672,8 @@ int port_savestate_load_exact(const char* path, PortSaveStatePortable* portable,
+ 	}
+ 	size_t at = 0;
+ 	for (uint32_t i = 0; i < range_count(); i++) {
+-		u8* start = (u8*)(uintptr_t)kRanges.ranges[i][0];
+-		const size_t len = (size_t)(kRanges.ranges[i][1] - kRanges.ranges[i][0]);
+-		memcpy(start, globals.data() + at, len);
++		const size_t len = range_size(i);
++		memcpy(range_start(i), globals.data() + at, len);
+ 		at += len;
+ 	}
+ 	for (int i = 0; i < n; i++)
 diff --git a/platform/trace/trace_windows.cpp b/platform/trace/trace_windows.cpp
 index 4067508..19ad775 100644
 --- a/platform/trace/trace_windows.cpp
@@ -1788,3 +1891,164 @@ index 3a13700..239f209 100644
  	const s32 now = (s32)VIGetRetraceCount();
  	if (now - due > max_behind)
  		due = now;
+diff --git a/tools/savestate_ranges.py b/tools/savestate_ranges.py
+index 73aa40a..db2f7df 100644
+--- a/tools/savestate_ranges.py
++++ b/tools/savestate_ranges.py
+@@ -5,12 +5,16 @@
+ 
+ A save state copies the game's own global variables (platform/savestate), and
+ only the link map says where the linker put them. This reads the map (GNU ld
+-on Linux and Windows, ld64 on macOS), keeps the writable sections that came
++on Linux and Windows, ld64 on macOS, lld on the PS5), keeps the writable sections that came
+ from the game's archives, merges the neighbours, and writes them with a
+ fingerprint of the build into the placeholder table in the executable (found by
+ its magic; kRanges in platform/savestate/savestate.cpp). The fingerprint is a
+ SHA-256 of the executable with the table blank, so two identical builds share
+ it and any other build differs. Running it again gives the same result.
++
++A position-independent executable (the PS5's) has its ranges at link
++addresses: --pie also records where the linker put the table, and the game
++slides the ranges by where it finds the table at run time.
+ """
+ 
+ import argparse
+@@ -118,6 +122,42 @@ def ld64_ranges(lines, archives):
+     return out
+ 
+ 
++LLD_LINE = re.compile(r"^\s*([0-9a-fA-F]+)\s+([0-9a-fA-F]+)\s+([0-9a-fA-F]+)\s+(\d+)( +)(\S.*)$")
++
++
++def lld_ranges(lines, archives):
++    """lld -Map: "VMA LMA Size Align Out In Symbol", the three last columns told
++    apart by their indent (an output section, then 8 more spaces for an input
++    section, 16 for a symbol)."""
++    out = []
++    section = None
++    for line in lines:
++        m = LLD_LINE.match(line.rstrip("\n"))
++        if not m:
++            continue
++        indent, text = len(m.group(5)), m.group(6)
++        if indent == 1:
++            section = text.split()[0]
++        elif indent == 9 and section and GNU_WRITABLE.match(section):
++            start, size = int(m.group(1), 16), int(m.group(3), 16)
++            if size and from_game(text, archives):
++                out.append([start, start + size])
++    return out
++
++
++def link_address(image, offset):
++    """The address an ELF64 file offset is loaded at (its PT_LOAD segment)."""
++    if image[:4] != b"\x7fELF" or image[4] != 2:
++        sys.exit("savestate_ranges: --pie needs a 64-bit ELF executable")
++    phoff, = struct.unpack_from("<Q", image, 0x20)
++    phentsize, phnum = struct.unpack_from("<HH", image, 0x36)
++    for i in range(phnum):
++        kind, _, p_offset, p_vaddr, _, p_filesz = struct.unpack_from("<IIQQQQ", image, phoff + i * phentsize)
++        if kind == 1 and p_offset <= offset < p_offset + p_filesz:
++            return p_vaddr + offset - p_offset
++    sys.exit("savestate_ranges: the range table is in no loaded segment")
++
++
+ def merge(ranges):
+     ranges = sorted(ranges)
+     merged = []
+@@ -134,13 +174,16 @@ def main():
+     parser.add_argument("--map", required=True)
+     parser.add_argument("--exe", required=True)
+     parser.add_argument("--archive", action="append", default=[])
++    parser.add_argument("--pie", action="store_true", help="record the table's link address, to slide by at run time")
+     args = parser.parse_args()
+     archives = args.archive or ["libsms_game.a"]
+ 
+     with open(args.map, encoding="utf-8", errors="replace") as f:
+         lines = f.readlines()
+     ld64 = any(line.startswith("# Object files:") for line in lines[:50])
+-    ranges = merge(ld64_ranges(lines, archives) if ld64 else gnu_ranges(lines, archives))
++    lld = any(re.match(r"\s+VMA\s+LMA\s+Size\s+Align\s+Out\s+In\s+Symbol", line) for line in lines[:5])
++    ranges = merge(ld64_ranges(lines, archives) if ld64 else
++                   lld_ranges(lines, archives) if lld else gnu_ranges(lines, archives))
+     if len(ranges) > MAX_RANGES:
+         sys.exit(f"savestate_ranges: {len(ranges)} ranges, more than the table's {MAX_RANGES}")
+ 
+@@ -152,7 +195,10 @@ def main():
+     blank = bytes(TABLE_SIZE - len(MAGIC))
+     image[at + len(MAGIC):at + TABLE_SIZE] = blank
+     fingerprint = hashlib.sha256(image).digest()
+-    table = fingerprint + struct.pack("<II", len(ranges), 0)
++    table_address = link_address(image, at) if args.pie else 0
++    if table_address >= 1 << 32:
++        sys.exit("savestate_ranges: the range table's link address does not fit its field")
++    table = fingerprint + struct.pack("<II", len(ranges), table_address)
+     table += b"".join(struct.pack("<QQ", start, end) for start, end in ranges)
+     image[at + len(MAGIC):at + len(MAGIC) + len(table)] = table
+ 
+diff --git a/tools/tests/test_savestate_ranges.py b/tools/tests/test_savestate_ranges.py
+index 046a189..c1f72cb 100644
+--- a/tools/tests/test_savestate_ranges.py
++++ b/tools/tests/test_savestate_ranges.py
+@@ -1,7 +1,8 @@
+ #!/usr/bin/env python3
+-"""tools/savestate_ranges.py: the game's data found in GNU ld and ld64 link maps."""
++"""tools/savestate_ranges.py: the game's data found in GNU ld, ld64 and lld link maps."""
+ import importlib.util
+ import pathlib
++import struct
+ import unittest
+ 
+ spec = importlib.util.spec_from_file_location(
+@@ -52,6 +53,36 @@ LD64 = """\
+ <<dead>> \t0x00000008\t[  2] _unused
+ """
+ 
++# lld (the PS5's link): an output section, input sections 8 spaces further in,
++# symbols 16; sizes in hex without 0x
++LLD = """\
++             VMA              LMA     Size Align Out     In      Symbol
++               0                0   ed7b30 16384 .text
++               0                0       40    16         libsms_game.a(Main.cpp.o):(.text.main)
++               0                0        0     1                 main
++         1adc000          1adc000      100    16 .data.rel.ro
++         1adc000          1adc000      100    16         libsms_game.a(Vtables.cpp.o):(.data.rel.ro._ZTV1T)
++         1da4240          1da4240      400    32 .data
++         1da4240          1da4240        4     4         /b/libps5_platform.a(platform.c.o):(.data.mouse_handle)
++         1da4240          1da4240        4     1                 mouse_handle
++         1da4244          1da4244       3c     4         libsms_game.a(Application.cpp.o):(.data.gpApplication)
++         1da4244          1da4244        4     1                 gpApplication
++         1da4280          1da4280       20     8         libsms_game.a(Mario.cpp.o):(.data._ZN5TMario5sDataE)
++         1df6658          1df6658      100     8 .bss
++         1df6658          1df6658       30     8         libsms_game.a(J2DPrint.cpp.o):(.bss._ZN8J2DPrint6mMutexE)
++         1df6688          1df6688        8     8         libsms_gx.a(gx_api.cpp.o):(.bss.s_state)
++"""
++
++
++def elf_with_segment(vaddr, p_offset):
++    """A 64-bit ELF header with one PT_LOAD segment, for link_address."""
++    image = bytearray(0x200)
++    image[:5] = b"\x7fELF\x02"
++    struct.pack_into("<Q", image, 0x20, 0x40)            # e_phoff
++    struct.pack_into("<HH", image, 0x36, 56, 1)           # e_phentsize, e_phnum
++    struct.pack_into("<IIQQQQ", image, 0x40, 1, 4, p_offset, vaddr, vaddr, 0x100)
++    return image
++
+ 
+ class RangesTest(unittest.TestCase):
+     archives = ['libsms_game.a', 'libsms_eclipse.a']
+@@ -64,6 +95,14 @@ class RangesTest(unittest.TestCase):
+         found = ranges.merge(ranges.ld64_ranges(LD64.splitlines(True), self.archives))
+         self.assertEqual(found, [[0x200040, 0x200070], [0x300000, 0x300100]])
+ 
++    def test_lld_keeps_game_input_sections_in_writable_data(self):
++        found = ranges.merge(ranges.lld_ranges(LLD.splitlines(True), self.archives))
++        self.assertEqual(found, [[0x1da4244, 0x1da42a0], [0x1df6658, 0x1df6688]])
++
++    def test_link_address_of_a_file_offset(self):
++        image = elf_with_segment(0x1ec0000, 0x100)
++        self.assertEqual(ranges.link_address(image, 0x150), 0x1ec0050)
++
+     def test_archive_members_in_either_linker_spelling(self):
+         self.assertTrue(ranges.from_game('/b/libsms_game.a(X.o)', self.archives))
+         self.assertTrue(ranges.from_game('/b/libsms_game.a[3](X.o)', self.archives))

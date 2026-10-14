@@ -16,3 +16,4 @@ rom/
 *.szs
 # never: texture packs (they belong to their authors)
 mods/
+__pycache__/

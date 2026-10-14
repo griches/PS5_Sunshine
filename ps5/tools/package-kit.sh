@@ -72,11 +72,11 @@ cp "$ps5/stubs/libSceMouse_stub.c" "$kit/ps5/stubs/"
 cp "$ps5/cmake/ps5-kit-game.cmake" "$kit/ps5/cmake/"
 cp "$ps5/patches/sms-pc-port.patch" "$ps5/patches/sdl.patch" "$kit/ps5/patches/"
 cp "$ps5/opengl/build-runtime.sh" "$kit/ps5/opengl/"
-cp "$ps5/kit/build-title.sh" "$ps5/kit/make-title.sh" "$ps5/kit/Dockerfile" "$kit/"
+cp "$ps5/kit/build-title.sh" "$ps5/kit/make-title.sh" "$ps5/kit/tools.sh" "$ps5/kit/Dockerfile" "$kit/"
 cp "$ps5/kit/README.md" "$kit/README.md"
 chmod +x "$kit/build-title.sh" "$kit/make-title.sh"
 mkdir -p "$kit/tools"
-cp "$ps5/tools/shrink-texture-pack.py" "$ps5/tools/get-texture-pack.py" "$kit/tools/"
+cp "$ps5/tools/shrink-texture-pack.py" "$ps5/tools/get-texture-pack.py" "$ps5/tools/fetch-wheels.py" "$kit/tools/"
 cp "$ps5/kit/make-texture-pack.sh" "$kit/"
 chmod +x "$kit/make-texture-pack.sh"
 # the revisions build-title.sh fetches: the ones this build was made from
@@ -105,6 +105,37 @@ cp "$vulkan/tooling/psbc/ps5-pie-unwind.ld" "$kit/vulkan/tooling/psbc/"
 cp "$vulkan"/tooling/native/*.cpp "$vulkan"/tooling/native/*.hpp "$vulkan"/tooling/native/*.map \
     "$vulkan"/tooling/native/*.ld "$kit/vulkan/tooling/native/"
 cp "$vulkan/runtime/libc.prx" "$vulkan/runtime/libc.prx.sha256" "$vulkan/runtime/README.md" "$kit/vulkan/runtime/"
+
+# ---- the fake-SELF tool built for Linux, static, so a Linux (or WSL) needs no C++
+# compiler: x86_64 and arm64, with zlib compiled in. A Mac builds its own from the
+# source above (its Command Line Tools have a compiler and zlib).
+zlib_version=1.3.2
+zlib="$root/.deps/zlib-$zlib_version"
+if [[ ! -f $zlib/zlib.h ]]; then
+    mkdir -p "$root/.deps"
+    curl -fsSL -o "$zlib.tar.gz" "https://github.com/madler/zlib/releases/download/v$zlib_version/zlib-$zlib_version.tar.gz"
+    echo "bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16  $zlib.tar.gz" | sha256sum --check --quiet
+    tar -xzf "$zlib.tar.gz" -C "$root/.deps"
+    rm -f "$zlib.tar.gz"
+fi
+for target in x86_64:x86_64-linux-gnu- aarch64:aarch64-linux-gnu-; do
+    arch=${target%%:*} prefix=${target#*:}
+    # the host's own compiler for its own processor
+    [[ $(uname -m) == "$arch" ]] && prefix=
+    command -v "${prefix}g++" > /dev/null ||
+        { echo "package-kit.sh: ${prefix}g++ is missing (apt install g++-${arch//_/-}-linux-gnu)" >&2; exit 2; }
+    objects="$build/native-tool-$arch"
+    rm -rf "$objects"
+    mkdir -p "$objects" "$kit/vulkan/prebuilt/Linux-$arch"
+    for file in adler32 crc32 deflate inflate inffast inftrees trees zutil; do
+        "${prefix}gcc" -O2 -c "$zlib/$file.c" -o "$objects/$file.o"
+    done
+    "${prefix}g++" -std=c++20 -O2 -static -I"$zlib" "$vulkan"/tooling/native/{native_app_builder,self_container,elf_object,sce_module_writer}.cpp \
+        "$objects"/*.o -o "$kit/vulkan/prebuilt/Linux-$arch/ps5-native-tool"
+    "${prefix}strip" "$kit/vulkan/prebuilt/Linux-$arch/ps5-native-tool"
+    rm -rf "$objects"
+done
+cp "$zlib/LICENSE" "$kit/vulkan/prebuilt/zlib-LICENSE.txt"
 
 # ---- the PS5 OpenGL SDK: the driver's archive and the console's two GPU import stubs
 mkdir -p "$kit/opengl/sdk/lib"
@@ -139,6 +170,7 @@ own_revision=$(git -C "$root" rev-parse HEAD 2>/dev/null || echo "(this kit's ow
     echo "PS5_Vulkan       https://github.com/mihawk-99/PS5_Vulkan                $(git -C "$vulkan" rev-parse HEAD) (its link recipe, CRT and native tool; no Vulkan driver is linked)"
     echo "SDL2             https://github.com/libsdl-org/SDL                      $sdl_revision (+ ps5/patches/sdl.patch and the console's drivers)"
     echo "Clang builtins   https://github.com/llvm/llvm-project                   $("$PS5_CLANG" --version | head -1)"
+    echo "zlib             https://github.com/madler/zlib                         $zlib_version (in vulkan/prebuilt's Linux tools)"
     echo
     echo "LICENSING.md says which licence covers which part."
 } > "$kit/SOURCES.txt"
@@ -149,7 +181,9 @@ leaks=$(find "$kit" \( -name 'libsms_game*' -o -path '*/sms_game.dir/*' -o -path
     -o -iname '*.iso' -o -iname '*.gcm' -o -iname '*.ciso' -o -iname '*.rvz' -o -iname '*.gci' -o -iname '*.szs' -o -iname '*.thp' \
     -o -iname '*.dol' -o -iname '*.arc' \) -print)
 [[ -z $leaks ]] || { echo "package-kit.sh: these must not be in a kit:" >&2; echo "$leaks" >&2; exit 1; }
-(cd "$root/dist/kit" && rm -f "$name.zip" && zip -qry "$name.zip" "$name")
+# (the files symlinks point to, not the links: Windows' own unzip, and Python's,
+# make a link a file holding its target's name, and the SDK has header links)
+(cd "$root/dist/kit" && rm -f "$name.zip" && zip -qr "$name.zip" "$name")
 printf '==> %s (%s unpacked, %s zipped)\n' "$root/dist/kit/$name.zip" \
     "$(du -sh "$kit" | cut -f1)" "$(du -sh "$root/dist/kit/$name.zip" | cut -f1)"
 sha256sum "$root/dist/kit/$name.zip"

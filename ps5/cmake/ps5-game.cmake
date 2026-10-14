@@ -79,8 +79,9 @@ set(SMS_GX_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 
 # The link: every object and archive CMake would hand the linker goes to the
 # console's recipe instead (the platform layer, the CRT, OpenGL, the fake SELF)
+# (and the port's save state tool, which writes the game's data ranges into the linked ELF)
 set(CMAKE_CXX_LINK_EXECUTABLE
-	"bash ${ps5}/tools/link-title.sh ${CMAKE_BINARY_DIR} ${PS5_VULKAN_DIR} ${PS5_PAYLOAD_SDK} --whole-archive ${ps5_platform_archive} --no-whole-archive <LINK_FLAGS> <OBJECTS> <LINK_LIBRARIES>")
+	"env SMS_SAVESTATE_RANGES=${CMAKE_SOURCE_DIR}/tools/savestate_ranges.py bash ${ps5}/tools/link-title.sh ${CMAKE_BINARY_DIR} ${PS5_VULKAN_DIR} ${PS5_PAYLOAD_SDK} --whole-archive ${ps5_platform_archive} --no-whole-archive <LINK_FLAGS> <OBJECTS> <LINK_LIBRARIES>")
 # (the start-up constructor in the platform archive has no caller: hence whole)
 
 # The platform archive is named by its file in the link, so the game does not

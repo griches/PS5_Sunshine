@@ -123,7 +123,7 @@ done
 radv_link_flags+=(--version-script "$work/link/game-local.map")
 "$sdk/bin/prospero-lld" "${radv_linker_script[@]}" --eh-frame-hdr "${radv_link_flags[@]}" \
     --version-script "$native/app-symbols.map" --exclude-libs=ALL \
-    -e _start -o "$work/link/llvm-pie.elf" \
+    -e _start -o "$work/link/llvm-pie.elf" -Map="$work/link/sms.map" \
     -u ps5_agc_gate2_run \
     "$work/link/obj/app_crt.o" --start-group "${objects[@]}" "${experimental[@]}" \
     -L "$opengl/lib" -lPS5OpenGL --end-group \
@@ -148,13 +148,22 @@ null_imports=$(comm -23 \
         awk '$1 == "U" { sub(/@.*/, "", $2); print $2 }' | sort -u) \
     <(for library in "$sdk"/target/lib/*.so "$work/link/stubs/libSceAgc.so" "$work/link/stubs/libSceAgcDriver.so" \
         "$work/link/stubs/libSceMouse.so"; do
-        case ${library##*/} in libkernel_sys.so | libScePosixForWebKit.so) continue ;; esac
+        # (an if, not a case: a Mac's bash 3.2 misreads a case pattern's ")" inside $( ))
+        if [[ ${library##*/} == libkernel_sys.so || ${library##*/} == libScePosixForWebKit.so ]]; then continue; fi
         "$sdk/bin/llvm-nm" -D --defined-only "$library" 2>/dev/null | awk '{ print $NF }'
     done | sort -u))
 if [[ -n $null_imports ]]; then
     echo "link-title.sh: imports that no module a title loads exports (null at run time): ${null_imports//$'\n'/ }" >&2
     echo "link-title.sh: bind them to the platform layer (PS5_Vulkan's tools/radv-link.sh)" >&2
     exit 1
+fi
+# Save states copy the game's own global variables: the port's tool reads where
+# the link put them from the map and writes them into the ELF, at link addresses
+# the game slides by where it was loaded (--pie). Without it, states keep only
+# the position.
+if [[ -n ${SMS_SAVESTATE_RANGES:-} ]]; then
+    python3 "$SMS_SAVESTATE_RANGES" --pie --map "$work/link/sms.map" --exe "$work/link/llvm-pie.elf" \
+        --archive libsms_game.a --archive libsms_eclipse.a
 fi
 "$tool" link --in "$work/link/llvm-pie.elf" --out "$work/eboot.elf.new" \
     --stub-dir "$sdk/target/lib" --stub "$work/link/stubs/libSceAgc.so" \
@@ -171,14 +180,20 @@ cp "$param" "$app/sce_sys/param.json"
 for asset in icon0.png pic0.dds pic1.dds snd0.at9; do
     [[ -f $ps5/sce_sys/$asset ]] && cp "$ps5/sce_sys/$asset" "$app/sce_sys/$asset"
 done
-(cd "$vulkan/runtime" && sha256sum --check --strict --quiet libc.prx.sha256)
+# (Python, not sha256sum: the builder kit runs this on a Mac too)
+python3 - "$vulkan/runtime/libc.prx" "$vulkan/runtime/libc.prx.sha256" <<'CHECK'
+import hashlib, sys
+want = open(sys.argv[2]).read().split()[0]
+if hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest() != want:
+    sys.exit("link-title.sh: libc.prx does not match libc.prx.sha256")
+CHECK
 cp "$vulkan/runtime/libc.prx" "$app/sce_module/libc.prx"
 mv "$work/eboot.elf.new" "$work/eboot.elf"
 # The linked ELF of the title last packaged, for tools/run.sh to symbolise a crash with
 # (the game's build tree may be on the VM's own disk)
 mkdir -p "$root/build"
 cp "$work/link/llvm-pie.elf" "$root/build/last-title.elf"
-printf '==> %s: %s (eboot.bin %s bytes)\n' "$title_id" "$app" "$(stat -c %s "$app/eboot.bin")"
+printf '==> %s: %s (eboot.bin %s bytes)\n' "$title_id" "$app" "$(wc -c < "$app/eboot.bin" | tr -d ' ')"
 # The licences beside eboot.bin
 mkdir -p "$app/licenses"
 

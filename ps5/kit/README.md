@@ -5,6 +5,8 @@ your own computer, for a PS5 that has homebrew enabled. It plays **your own
 copy** of the game, from your own disc image, at 4K and 60 frames a second.
 
 You run one command. Your computer does the rest in about 5 to 20 minutes.
+Nothing needs installing first on a Mac or Linux beyond what the steps below
+say; on Windows it runs in WSL.
 
 > **There is no game in this kit.** No game code, no game data, nothing of
 > Nintendo's. The build fetches the public source code it needs and compiles
@@ -27,12 +29,15 @@ You need three things.
 revision 0), as `.iso`, `.gcm` or Dolphin's `.ciso`. Other regions are not
 supported.
 
-**3. A computer** (Windows, macOS or Linux) with:
+**3. A computer**, one of:
 
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/), installed and running
-- an internet connection (the build downloads a compiler and the source code)
-- about 4 GB of free disk space
-- 8 GB of memory or more
+- a Mac with Apple silicon (M1 or later), macOS 13 or later
+- Windows 10 or 11, with WSL (Windows' own Linux, installed in step 2)
+- Linux on x86_64 or arm64 (Ubuntu, Debian, Fedora, ...)
+
+with an internet connection, about 6 GB of free disk space and 8 GB of memory
+or more. (An Intel Mac works too if you install LLVM 22 yourself: see
+*If something goes wrong*.)
 
 ---
 
@@ -41,34 +46,73 @@ supported.
 Unzip `sunshine-ps5-kit-<version>.zip` anywhere. You get a folder with this
 `README.md`, `make-title.sh` and the rest of the kit in it.
 
-## Step 2: Start Docker
+## Step 2: Get your computer ready (once)
 
-Open Docker Desktop and wait until it says it is running.
+**Mac.** Open Terminal and run:
+
+```sh
+xcode-select --install
+```
+
+and click Install. These are Apple's Command Line Tools (git, Python and a
+compiler). If it says they are already installed, you are ready.
+
+**Windows.** Open PowerShell **as administrator** and run:
+
+```powershell
+wsl --install
+```
+
+Restart when it asks, then open **Ubuntu** from the Start menu and choose a
+user name and password. Then, in Ubuntu, install what the build uses and the
+compiler, LLVM 22, from [apt.llvm.org](https://apt.llvm.org) (LLVM's own
+packages for Ubuntu):
+
+```sh
+sudo apt update && sudo apt install -y git python3 patch curl xz-utils unzip lsb-release wget gnupg software-properties-common
+curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh && sudo bash /tmp/llvm.sh 22 && sudo apt install -y llvm-22
+```
+
+Move the kit into Ubuntu's own disk (building from the Windows drive is
+several times slower). If you unzipped it to your Downloads folder:
+
+```sh
+cp -r /mnt/c/Users/<you>/Downloads/sunshine-ps5-kit-<version> ~/
+cd ~/sunshine-ps5-kit-<version>
+```
+
+**Linux.** You need git, Python 3, `patch` and curl, and LLVM 22 is best
+installed from [apt.llvm.org](https://apt.llvm.org). On Ubuntu or Debian:
+
+```sh
+sudo apt install -y git python3 patch curl xz-utils lsb-release wget gnupg software-properties-common
+curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh && sudo bash /tmp/llvm.sh 22 && sudo apt install -y llvm-22
+```
+
+On another Linux, the build fetches LLVM's own build of LLVM 22 instead, if
+the libraries it needs are there (it says what to do if they are not).
 
 ## Step 3: Build the title
 
-Open a terminal **in the kit's folder** and run the command for your system.
-
-**macOS or Linux**
+Open a terminal **in the kit's folder** (on Windows, the Ubuntu window from
+step 2) and run:
 
 ```sh
 ./make-title.sh
 ```
 
-**Windows (PowerShell)**
-
-```powershell
-docker build -t sunshine-ps5-kit .
-docker run --rm -v ${PWD}\out:/out sunshine-ps5-kit /out
-```
-
-(If you use WSL, the macOS and Linux command works there instead.)
+The first time, it fetches what it needs and your computer does not have: on a
+Mac the compiler (LLVM 22, about 1.5 GB), and CMake and Ninja (small build
+tools), from their projects' own releases. It checks each download and keeps
+it for next time (in `~/Library/Caches/sunshine-ps5-kit` on a Mac,
+`~/.cache/sunshine-ps5-kit` on Linux). It installs nothing system-wide and
+never asks for your password.
 
 ### What you will see
 
 | Stage | What it does | How long |
 | --- | --- | --- |
-| First run only | Builds the container; downloads a compiler (about 1 GB) | a few minutes |
+| First run only | Fetches what is missing: on a Mac the compiler, CMake and Ninja (about 1.6 GB) | a few minutes |
 | `fetching` | Downloads the PC port and the decompilation from GitHub | a minute |
 | `configuring` | Prepares the build | under a minute |
 | `compiling the game's code` | Compiles about 600 files for the PS5. **This is the long one.** | 3 to 15 minutes |
@@ -79,6 +123,8 @@ It is finished when it prints the path of a folder ending in `PPSA99312`.
 ## Step 4: Copy it to the PS5
 
 The result is the folder `out/PPSA99312` inside the kit's folder (about 50 MB).
+On Windows, open it from File Explorer at
+`\\wsl$\Ubuntu\home\<you>\sunshine-ps5-kit-<version>\out`.
 
 With an FTP program (FileZilla, Cyberduck, WinSCP), connect to your PS5 and
 copy that **whole folder** into `/data/homebrew/`. Then copy **your disc
@@ -104,6 +150,7 @@ image** into it, beside `eboot.bin`, so that you end up with:
 | Square | X |
 | Triangle | Y (first-person view) |
 | R1 | Z |
+| L1 + R1 | **Save state** (in a level); in the pause menu, the list of save states to load |
 | L2, R2 | L, R (R sprays FLUDD) |
 | Options | Start (pause, map) |
 | Touch pad button | **Settings** |
@@ -134,6 +181,15 @@ the PC port's cheats (god mode, infinite lives and so on).
 Your saves and settings are kept on the console in
 `/data/homebrew/PPSA99312/userdata/`.
 
+### Save states
+
+Hold L1 and press R1 in a level to save the moment. Pause (Options) and press
+L1 + R1 again to see your save states, with a picture of each, and load one.
+They are kept beside your memory card, in a `savestates` folder in
+`/data/homebrew/PPSA99312/userdata/`. A state loads exactly only in the build
+that saved it; after you rebuild, older states put Mario back where he was in
+that level and keep your progress, but the level starts afresh.
+
 ---
 
 ## Optional: HD textures
@@ -143,17 +199,13 @@ downloads the [Super Mario Sunshine UHD Texture Pack](https://github.com/qashto/
 (by qashto and razius) and the [HD texture extras](https://github.com/chasem-dev/sms-hd-texture-extras)
 (by chasem-dev) from their authors and makes a copy sized for the console:
 
-**macOS or Linux**
-
 ```sh
 ./make-texture-pack.sh
 ```
 
-**Windows (PowerShell)**
-
-```powershell
-docker run --rm --entrypoint python3 -v ${PWD}\out:/out sunshine-ps5-kit /kit/tools/get-texture-pack.py /out
-```
+(On Windows, in the Ubuntu window, as in step 3.) The first time it fetches
+the two Python packages it uses, Pillow and etcpak, and on Linux 7-Zip, into
+the same cache as the compiler.
 
 It downloads about 1 GB, needs about 5 GB of free disk space while it works,
 and leaves `out/textures` (1.3 GB). Copy that folder to the console as:
@@ -176,25 +228,46 @@ shrunk the same way with `tools/shrink-texture-pack.py SOURCE DEST`.
 
 ## If something goes wrong
 
-**"docker was not found"**
-Docker Desktop is not installed, or not running. Start it and try again.
+**"this Mac needs Apple's Command Line Tools"**
+Run `xcode-select --install`, wait for it to finish, and run the command
+again.
+
+**"missing: git python3 ..."**
+Install what it names (step 2 has the command for Ubuntu and Debian).
+
+**"LLVM's own Linux build would not run here: it needs libxml2.so.2"**
+Newer Linux releases (Ubuntu 26.04, Debian 13) no longer have that library.
+Install LLVM 22 from apt.llvm.org as in step 2; the build then uses it.
+
+**"LLVM publishes no build for Darwin on x86_64"** (an Intel Mac)
+Install LLVM 22 with Homebrew, then point the kit at it:
+
+```sh
+brew install llvm@22 lld@22
+PS5_CLANG=$(brew --prefix llvm@22)/bin/clang ./make-title.sh
+```
 
 **The fetch fails**
 The build needs to reach github.com the first time. Check the connection and
 run the command again.
 
-**The build stops part way with "Killed", or Docker closes**
-It ran out of memory. Either give Docker more (Docker Desktop > Settings >
-Resources), or run fewer compilers at once:
+**The build stops part way with "Killed"**
+It ran out of memory. Run fewer compilers at once:
 
 ```sh
 JOBS=4 ./make-title.sh
 ```
 
-On Windows, add `-e JOBS=4` after `docker run --rm`.
+On Windows, WSL may also need more memory: see Microsoft's notes on
+`.wslconfig`.
 
 **It was interrupted**
-Run the same command again. It carries on from where it stopped.
+Run the same command again. It carries on from where it stopped, including a
+download.
+
+**A download fails or "did not download correctly"**
+Run the command again. Every download is checked against the checksum the kit
+expects, and a bad one is thrown away.
 
 **The game does not appear on the PS5**
 Check the folder is exactly `/data/homebrew/PPSA99312/` with `eboot.bin`
@@ -211,13 +284,15 @@ Unzip the new kit, build again, and copy the new `out/PPSA99312` over the old
 one on the console. Your saves, settings, disc image and texture packs are
 left alone.
 
-## Without Docker (Linux only)
+## With Docker instead
 
-If you already have LLVM 22 (clang, lld, llvm tools), CMake, Ninja, git,
-Python 3, `patch`, a C++ compiler and the zlib development headers:
+If you would rather build in a container (Docker Desktop or Podman), the kit
+still can: `./make-title.sh --docker` and `./make-texture-pack.sh --docker`.
+On Windows without WSL, in PowerShell:
 
-```sh
-./build-title.sh
+```powershell
+docker build -t sunshine-ps5-kit .
+docker run --rm -v ${PWD}\out:/out sunshine-ps5-kit /out
 ```
 
 ---
@@ -226,11 +301,12 @@ Python 3, `patch`, a C++ compiler and the zlib development headers:
 
 | Path | What |
 | --- | --- |
-| `make-title.sh`, `Dockerfile` | Runs the build in a container. |
+| `make-title.sh` | Builds the title (`--docker`: in a container, with `Dockerfile`). |
 | `build-title.sh` | The build itself: fetch, patch, compile, link. |
+| `tools.sh` | Finds LLVM 22, CMake and Ninja, or fetches them once, checked. |
 | `lib/` | The port's own compiled parts: the platform layer, the graphics layer, SDL2. |
 | `opengl/` | The PS5 OpenGL SDK's driver, as this port links it. |
-| `vulkan/` | PS5_Vulkan's link recipe and the tool that makes `eboot.bin` (no Vulkan driver). |
+| `vulkan/` | PS5_Vulkan's link recipe and the tool that makes `eboot.bin` (no Vulkan driver), built for Linux in `vulkan/prebuilt/`. |
 | `sdk/` | The payload SDK's compiler wrappers, headers, libraries and link scripts. |
 | `ps5/` | The console's patch to the PC port, the link script, the title's icon and pictures. |
 | `make-texture-pack.sh`, `tools/` | Downloads an HD texture pack and sizes it for the console. |

@@ -14,7 +14,7 @@ the native PC port of Super Mario Sunshine by **[chasem-dev](https://github.com/
 > platform, sound, input and graphics layers, 60 and 120 frames a second,
 > widescreen, texture packs and a great deal more, built on the
 > [decompilation](https://github.com/chasem-dev/sms-english) it carries. This
-> repository adds only what a PS5 needs on top of it: a patch of about 900
+> repository adds only what a PS5 needs on top of it: a patch of about 1,000
 > lines, the console's drivers and a build recipe. If you enjoy this, the
 > thanks belong there. **Please star and support
 > [chasem-dev/sms-pc-port](https://github.com/chasem-dev/sms-pc-port).**
@@ -31,7 +31,7 @@ This is an unofficial port. It is not part of sms-pc-port and is not supported
 by it: **please do not take PS5 problems to chasem-dev.** Report them
 [here](https://github.com/griches/PS5_Sunshine/issues).
 
-## This is an early release: 0.8.0
+## This is an early release: 0.9.0
 
 **It is not fully tested.** It was brought up and played on one console over a
 single day (2026-10-13), through the opening, Delfino Plaza and the first
@@ -39,28 +39,37 @@ episode of Bianco Hills. Everything after that is unplayed on a PS5. Expect
 faults; several serious ones were found and fixed only by playing, and there
 will be more further into the game. Keep a copy of your save.
 
+New in 0.9.0: sms-pc-port's save states (L1 + R1) and its faster wipe into the
+map, from its revision of 2026-10-14, and a builder kit that no longer needs
+Docker.
+
 ## How to get it: the builder kit
 
 A built title holds the game's own code, so none is offered here. The
 [release](https://github.com/griches/PS5_Sunshine/releases/latest) is a
 **builder kit**: everything of a build except that code. On your own computer
 it downloads the public source code, compiles it and links the title. One
-command, about 5 to 20 minutes, with Docker.
+command, about 5 to 20 minutes, on a Mac with Apple silicon, on Linux, or on
+Windows in WSL. No Docker: on Ubuntu and WSL the compiler, LLVM 22, comes from
+LLVM's own packages (apt.llvm.org); on a Mac it and the build tools are fetched
+from their own releases the first time, checked, and kept for next time.
 
 1. Download `sunshine-ps5-kit-<version>.zip` from the
    [releases page](https://github.com/griches/PS5_Sunshine/releases/latest) and unzip it.
-2. Start Docker Desktop, open a terminal in the kit's folder and run `./make-title.sh`.
+2. Get your computer ready once (a Mac: Apple's Command Line Tools; Windows: WSL
+   and LLVM 22; the kit's README has the commands), then open a terminal in the
+   kit's folder and run `./make-title.sh`.
 3. Copy the folder it makes, `out/PPSA99312`, to `/data/homebrew/` on the console (FTP).
 4. Copy your own disc image (`.iso`, `.gcm` or `.ciso`) into that folder, beside `eboot.bin`.
 
 The kit's own [README](ps5/kit/README.md) has every step, the controls, the
-settings menu, Windows commands and what to do when something goes wrong.
+settings menu, the steps for Windows and what to do when something goes wrong.
 
 **Never share the folder the kit makes, or its `eboot.bin`.**
 
 ## Status
 
-Tested on one console (PS5, firmware 13.60) on 2026-10-13, with the North
+Tested on one console (PS5, firmware 13.60) on 2026-10-13 and 2026-10-14, with the North
 American disc (`GMSE01`, revision 0). "Seen" means it ran there and was
 watched by a person playing, looked at in the console's own screenshots, or
 read in the title's log. Nothing else is claimed.
@@ -74,9 +83,12 @@ read in the title's log. Nothing else is claimed.
 | Input | Walking, jumping, the camera, FLUDD, menus, the DualSense's own button prompts | Every button in play; rumble; a second controller |
 | Settings | The touch pad's menu: inverted FLUDD aim and camera, camera shake, the performance overlay, resolution, frame rate; choices kept across a restart | Every row; the cheats below them |
 | Saving | A save made earlier loads | Saving in play, checked after a restart |
+| Save states | Saving with L1 + R1 in a level, the pause menu's list with pictures, loading a state, and loading after a restart | States across many levels; a state from another build (loads the position only, by design) |
+| The map (R1) | The wipe into it, now quick | |
 | Sound | Music, effects and the movies' sound play | A careful listen for faults |
 | Texture packs | The UHD pack and the HD extras, sized for the console (see below) | Other packs |
 | Memory | Two levels and back without running out, with the console-sized pack | Many levels in one session |
+| Builder kit | Built without Docker on a Mac (Apple silicon, macOS's own tools) and on Linux (arm64), and the Mac's title played on the console. On x86-64 Linux: LLVM's build fetched and run, a game file compiled identically, `eboot.bin` made byte for byte the same | A whole build on Windows (WSL) or x86-64 Linux; the `--docker` route |
 
 ### Known problems
 
@@ -89,8 +101,11 @@ read in the title's log. Nothing else is claimed.
 - **Camera shake is off to begin with.** The game's earthquakes (a boss
   landing, a building rising) are strong on a large screen. Turn them back on
   in the settings menu if you want the original feel.
-- **No save states.** sms-pc-port has since gained them; this port is built on
-  the revision before, and has not tried them.
+- **Save states belong to the build that saved them.** L1 + R1 saves one in a
+  level, and loads one from the pause menu (sms-pc-port's own). A state loads
+  exactly only in the build that saved it: after a rebuild it puts Mario back
+  where he was and keeps the progress, but the level starts afresh. Keep a
+  copy of your memory card save as well.
 
 ## What the console needed
 
@@ -116,6 +131,11 @@ For the curious, and for anyone porting something similar. All of it is in
 - **Threads.** The game's video decoder runs below its main thread and was
   starved whenever a frame had no time to spare; the main thread now gives the
   others a turn.
+- **Save states.** sms-pc-port finds the game's global variables for a state
+  in the link map after linking. The console's title is linked by lld and
+  loaded at an address of its own choosing, so the map is read with lld's
+  layout and the ranges are written at link addresses, which the game slides
+  by where it was loaded.
 - **The console's own menu.** The touch pad's button opens settings a PS5 has
   no keyboard or launcher for.
 
@@ -129,7 +149,7 @@ tools; no Vulkan driver is linked) and the PS5 OpenGL SDK 1.0.2.
 ```sh
 git clone https://github.com/griches/PS5_Sunshine.git && cd PS5_Sunshine
 git clone https://github.com/chasem-dev/sms-pc-port.git vendor/sms-pc-port
-git -C vendor/sms-pc-port checkout f3590911967886041f41586596b35ed124e8a43f   # see ps5/kit: REVISIONS
+git -C vendor/sms-pc-port checkout c8fb4a3e81a2176588574395302ecf862f9a440a   # see ps5/kit: REVISIONS
 git -C vendor/sms-pc-port submodule update --init decomp
 export PS5_VULKAN_DIR=/path/to/PS5_Vulkan PS5_OPENGL_PREFIX=/path/to/ps5-opengl-sdk/sdk
 ps5/tools/build.sh           # applies the patch, builds dist/PPSA99312/
